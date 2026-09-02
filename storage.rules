@@ -1,0 +1,22 @@
+rules_version = '2';
+
+// Photographs attached to memories. Public to look at, because the whole point
+// is that a stranger finds them; writable only into your own folder, only as an
+// image, and only up to 3 MB. Everything is checked by the moderation route
+// before it is ever uploaded.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /memories/{uid}/{photoId} {
+      allow read: if true;
+      allow create: if request.auth != null
+        && request.auth.uid == uid
+        && request.resource.size < 3 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp)');
+      allow update: if false;
+      allow delete: if request.auth != null && request.auth.uid == uid;
+    }
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

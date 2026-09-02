@@ -1,36 +1,77 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Nukkad
 
-## Getting Started
+*Nukkad* — the street corner. The tea stall, the bench, the place a
+neighbourhood gathers and stories go round.
 
-First, run the development server:
+Walk a real city, drawn street for street from open map data. Find the memories
+people have left at the places they happened, and leave your own. When you want
+more, the city has its own history to find.
+
+> Google Maps shows you where places are. Wikipedia tells you what happened
+> there. This shows you what people remember there.
+
+## What it does
+
+**Any city, built on demand.** Type a name and the place assembles in a few
+seconds — streets, buildings, parks, street trees — pulled from OpenStreetMap,
+projected to metres and drawn isometrically. Lisbon comes back with 1,400 roads,
+1,600 buildings and 1,581 trees.
+
+**Memories pinned to real ground.** Leave one anywhere, with a photograph if you
+like. Anyone walking that street later can find the heart, stand by it and read
+what happened to you there. Every memory carries a first name, so a stranger
+finds a person rather than an anonymous note.
+
+**A city you share.** Everyone exploring the same city sees each other walking
+it, with names above their heads. There is a text channel per city, questions
+you can leave for whoever knows the place, and proximity voice — people fade up
+as you walk toward them and fade out as you leave.
+
+**And a game, if you want one.** Real events with real coordinates, drawn from
+Wikipedia and written into riddles. Four witnesses stand on real corners, each
+one narrowing the search — what happened, which part of the city, what stands
+around it, which landmark it sits beside — and each locked until the last one
+sends you. One of them is honestly mistaken. Guess the spot and the reveal shows
+you the actual Street View photograph of the place.
+
+## Running it
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+`.env.local` needs:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```
+GEMINI_API_KEY=…                        # Google AI Studio
+NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=…       # Street View Static + Geocoding
+NEXT_PUBLIC_FIREBASE_API_KEY=…          # and the rest of the Firebase config
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Everything degrades rather than breaking. Without Gemini the clues fall back to
+redacted source text; without Firebase, memories live in browser storage.
 
-## Learn More
+## How it is put together
 
-To learn more about Next.js, take a look at the following resources:
+| | |
+|---|---|
+| Rendering | Pixi.js, isometric, one canvas |
+| Map data | OpenStreetMap via Overpass, geocoded with Nominatim |
+| History | Wikipedia geosearch, filtered so a district can never be an answer |
+| Writing | Gemini, rotated across seven models to survive the free tier |
+| Storage | Firestore and Firebase Storage, anonymous auth |
+| Photographs | Google Street View Static, proxied so the key stays server-side |
+| Voice | WebRTC peer to peer, Firestore carrying only the handshake |
+| Sound | WebAudio, NES-style pulse waves, no audio files |
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+`scripts/` holds a BigQuery pipeline that bakes a city's cases from
+OpenStreetMap's `historic=*` tags. `DEPLOY.md` covers Firestore, Cloud Run and
+the Google Cloud setup.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Safety
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Memories are moderated before they are stored: first names only, no contact
+details, nothing aimed at a private address, and photographs are checked by
+Gemini vision before they are uploaded anywhere. Firestore rules make every
+memory append-only and deletable only by whoever left it.

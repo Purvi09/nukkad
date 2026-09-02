@@ -1,0 +1,137 @@
+rules_version = '2';
+
+// Memories are public to read and personal to own. Anyone signed in — everyone
+// is, anonymously — may leave one, but only against their own uid, and only
+// they can take it down. Nothing here is editable after the fact: a memory is
+// a thing someone said at a place, not a document.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /memories/{memoryId} {
+      allow read: if true;
+
+      allow create: if request.auth != null
+        && request.resource.data.author == request.auth.uid
+        && request.resource.data.text is string
+        && request.resource.data.text.size() >= 12
+        && request.resource.data.text.size() <= 400
+        && request.resource.data.city is string
+        && request.resource.data.city.size() <= 60
+        && request.resource.data.place is string
+        && request.resource.data.place.size() <= 120
+        && request.resource.data.x is number
+        && request.resource.data.y is number
+        && request.resource.data.lat is number
+        && request.resource.data.lon is number
+        && request.resource.data.shareAsMystery is bool;
+
+      allow update: if false;
+      allow delete: if request.auth != null
+        && resource.data.author == request.auth.uid;
+    }
+
+    /**
+     * Generated content, cached so the second player of a city costs nothing.
+     *
+     * Written by clients, which is a deliberate trade: without a service
+     * account the server cannot write, and a poisoned cache costs a bad round
+     * rather than anything dangerous. Size is capped and entries expire by the
+     * version stamp the app checks on read.
+     */
+    match /cases/{citySlug} {
+      allow read: if true;
+      allow create, update: if request.auth != null
+        && request.resource.data.version is string
+        && request.resource.data.at is number
+        && request.resource.data.sites is list
+        && request.resource.data.sites.size() <= 30;
+      allow delete: if false;
+    }
+
+    match /casts/{siteId} {
+      allow read: if true;
+      allow create, update: if request.auth != null
+        && request.resource.data.version is string
+        && request.resource.data.at is number
+        && request.resource.data.witnesses is list
+        && request.resource.data.witnesses.size() <= 6;
+      allow delete: if false;
+    }
+
+    /**
+     * Who is walking a city right now. Written only against your own uid, and
+     * removed when you leave. Nothing here outlives the session.
+     */
+    match /presence/{key} {
+      allow read: if true;
+      allow write: if request.auth != null
+        && (request.method == "delete" || (
+          request.resource.data.uid == request.auth.uid
+          && request.resource.data.city is string
+          && request.resource.data.name is string
+          && request.resource.data.name.size() <= 20
+          && request.resource.data.x is number
+          && request.resource.data.y is number
+        ));
+    }
+
+    /** City chat. Append-only: nothing said can be edited afterwards. */
+    match /chat/{lineId} {
+      allow read: if true;
+      allow create: if request.auth != null
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.city is string
+        && request.resource.data.text is string
+        && request.resource.data.text.size() > 0
+        && request.resource.data.text.size() <= 240
+        && request.resource.data.name.size() <= 20;
+      allow update: if false;
+      allow delete: if request.auth != null && resource.data.uid == request.auth.uid;
+    }
+
+    /** Questions for whoever knows the city, and the answers they leave. */
+    match /questions/{questionId} {
+      allow read: if true;
+      allow create: if request.auth != null
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.city is string
+        && request.resource.data.text is string
+        && request.resource.data.text.size() >= 8
+        && request.resource.data.text.size() <= 220;
+      allow update: if false;
+      allow delete: if request.auth != null && resource.data.uid == request.auth.uid;
+    }
+
+    match /answers/{answerId} {
+      allow read: if true;
+      allow create: if request.auth != null
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.questionId is string
+        && request.resource.data.text is string
+        && request.resource.data.text.size() >= 8
+        && request.resource.data.text.size() <= 220;
+      allow update: if false;
+      allow delete: if request.auth != null && resource.data.uid == request.auth.uid;
+    }
+
+    /**
+     * WebRTC handshake traffic. Each note is addressed to one person, read only
+     * by them, and deleted the moment it is consumed — no audio passes through
+     * here, only the offers and candidates needed to connect two browsers.
+     */
+    match /signals/{signalId} {
+      allow create: if request.auth != null
+        && request.resource.data.from == request.auth.uid
+        && request.resource.data.to is string
+        && request.resource.data.kind is string
+        && request.resource.data.payload is string
+        && request.resource.data.payload.size() <= 8000;
+      allow read, delete: if request.auth != null && resource.data.to == request.auth.uid;
+      allow update: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
