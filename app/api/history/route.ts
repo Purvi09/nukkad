@@ -205,6 +205,7 @@ For each entry below, write a 2-3 sentence clue describing what happened there.
 Hard rules:
 - Use ONLY facts present in that entry's summary. Invent nothing — no dates, names, or events that are not in the text.
 - NEVER write the place's name, or any distinctive word from it. That is the answer.
+- Do not name the square, street, park or district it stands in either. Where it is, is what the player has to work out; say what it is and what happened.
 - Do describe what a person standing there would see, and what happened there.
 - Write as though the player is standing at one specific spot — a building, a monument, a corner — never a whole district or region.
 - Also return "era": the single year or century the summary gives, or "undated".

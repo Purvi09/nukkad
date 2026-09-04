@@ -6,12 +6,12 @@
 // player after the first costs nothing.
 
 import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
-import { db, firebaseReady } from "./firebase";
+import { currentUid, db, firebaseReady } from "./firebase";
 import type { Site } from "./geo";
 import type { Witness } from "./witnesses";
 
 /** Bump when the shape or the prompts change, so stale writing is not served. */
-const VERSION = "v2";
+const VERSION = "v3";
 
 /** How many cases to write for a city, so each session can deal a fresh hand. */
 export const POOL_SIZE = 14;
@@ -42,6 +42,8 @@ export const storeCases = async (citySlug: string, sites: Site[]) => {
   const store = firebaseReady ? db() : null;
   if (!store || sites.length === 0) return;
   try {
+    // the rules want a signed-in author, and this runs before anything else has signed in
+    if (!(await currentUid())) return;
     await setDoc(doc(store, "cases", citySlug), {
       version: VERSION,
       at: Date.now(),
@@ -70,6 +72,7 @@ export const storeCast = async (siteId: string, witnesses: Witness[]) => {
   const store = firebaseReady ? db() : null;
   if (!store || witnesses.length === 0) return;
   try {
+    if (!(await currentUid())) return;
     await setDoc(doc(store, "casts", siteId.replace(/\//g, "_")), {
       version: VERSION,
       at: Date.now(),

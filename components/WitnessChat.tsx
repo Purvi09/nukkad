@@ -34,17 +34,38 @@ const SUGGESTIONS = [
   "Who else would know?",
 ];
 
+/** Once they have talked, the useful questions are different ones. */
+const AFTERWARDS = [
+  "Who else would know?",
+  "Where exactly do I find them?",
+  "Anything else you remember?",
+];
+
+/** Past this the server has already fallen back; the browser must not wait longer. */
+const REPLY_TIMEOUT_MS = 22_000;
+/** After this long, say so, or "…" reads as a hang. */
+const SLOW_AFTER_MS = 5_000;
+
 export default function WitnessChat({ witness, sentBy, history, told, onSay, onClose }: Props) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [slow, setSlow] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The question that failed, so one press can ask it again. */
+  const [failed, setFailed] = useState<string | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => { inputRef.current?.focus(); }, []);
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [history, busy]);
+  }, [history, busy, slow, error]);
+
+  useEffect(() => {
+    if (!busy) return;
+    const id = window.setTimeout(() => setSlow(true), SLOW_AFTER_MS);
+    return () => { window.clearTimeout(id); setSlow(false); };
+  }, [busy]);
 
   // Esc closes, and keystrokes must not reach the walking controls underneath.
   useEffect(() => {
@@ -63,6 +84,7 @@ export default function WitnessChat({ witness, sentBy, history, told, onSay, onC
     setDraft("");
     setBusy(true);
     setError(null);
+    setFailed(null);
     const asked: Turn[] = [...history, { from: "player", text: question }];
     onSay(asked, false);
 
@@ -70,6 +92,7 @@ export default function WitnessChat({ witness, sentBy, history, told, onSay, onC
       const response = await fetch("/api/witness-chat", {
         method: "POST",
         headers: { "content-type": "application/json" },
+        signal: AbortSignal.timeout(REPLY_TIMEOUT_MS),
         body: JSON.stringify({
           witness: {
             name: witness.name,
@@ -89,7 +112,12 @@ export default function WitnessChat({ witness, sentBy, history, told, onSay, onC
       if (!response.ok) throw new Error(data?.error ?? "They turned away.");
       onSay([...asked, { from: "witness", text: data.reply }], !!data.revealed);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "They turned away.");
+      const timedOut = caught instanceof Error && caught.name === "TimeoutError";
+      setError(timedOut ? `${witness.name} is taking too long.` : "They turned away.");
+      setFailed(question);
+      // put the conversation back the way it was, so asking again does not
+      // leave a dangling question in the log
+      onSay(history, false);
     } finally {
       setBusy(false);
     }
@@ -122,12 +150,23 @@ export default function WitnessChat({ witness, sentBy, history, told, onSay, onC
             {turn.text}
           </p>
         ))}
-        {busy && <p className="chat-line chat-line--witness chat-thinking">…</p>}
-        {error && <p className="chat-error">{error}</p>}
+        {busy && (
+          <p className="chat-line chat-line--witness chat-thinking">
+            {slow ? "still thinking…" : "…"}
+          </p>
+        )}
+        {error && (
+          <p className="chat-error">
+            {error}
+            {failed && (
+              <button className="chat-retry" onClick={() => send(failed)}>Ask again</button>
+            )}
+          </p>
+        )}
       </div>
 
       <div className="chat-suggestions">
-        {SUGGESTIONS.map((s) => (
+        {(told ? AFTERWARDS : SUGGESTIONS).map((s) => (
           <button key={s} className="chip" disabled={busy} onClick={() => send(s)}>{s}</button>
         ))}
       </div>

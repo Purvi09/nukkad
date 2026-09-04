@@ -6,6 +6,8 @@ export type LatLon = { lat: number; lon: number };
 
 /** A polyline or polygon, already projected to local metres. */
 export type Way = {
+  /** OpenStreetMap id, so a way that straddles two tiles is drawn once. */
+  id?: number;
   /** flat [x0,y0,x1,y1,...] in metres, x east, y south */
   pts: number[];
   kind: string;
@@ -24,6 +26,32 @@ export type CityData = {
   label: string;
   centre: LatLon;
   radius: number;
+  roads: Way[];
+  buildings: Way[];
+  water: Way[];
+  parks: Way[];
+  trees: Dot[];
+};
+
+/**
+ * The city streams in square tiles as you walk. The first payload covers the
+ * tiles around the centre; the rest arrive on demand and are dropped again
+ * once they are far behind you, so a dense city never has to be drawn whole.
+ */
+export const TILE_M = 400;
+/** Tiles are indexed -MAX..MAX in each direction; past that the map ends. */
+export const MAX_TILE_INDEX = 6;
+/** How far from the centre you may walk. Inside the outermost tile ring. */
+export const WORLD_LIMIT_M = (MAX_TILE_INDEX + 1) * TILE_M - 100;
+/** The initial payload covers tiles -CORE_SPAN..CORE_SPAN-1 in each direction. */
+export const CORE_SPAN = 3;
+
+export const tileIndex = (metres: number) => Math.floor(metres / TILE_M);
+export const tileKey = (cx: number, cy: number) => `${cx},${cy}`;
+
+export type TileData = {
+  cx: number;
+  cy: number;
   roads: Way[];
   buildings: Way[];
   water: Way[];

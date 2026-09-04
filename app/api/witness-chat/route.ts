@@ -61,7 +61,10 @@ export async function POST(request: Request) {
   const parsed = await askGeminiJson<{ reply?: string; revealed?: boolean }>({
     tier: "cheap",
     temperature: 0.9,
-    timeoutMs: 20_000,
+    // Somebody is standing in the street waiting for this line. Past twelve
+    // seconds the keyword reply, which carries the same fact, is the kinder answer.
+    timeoutMs: 8_000,
+    budgetMs: 12_000,
     prompt:
 `You are ${witness.name ?? "a local"}, who ${witness.role ?? "lives around here"}. You are standing ${witness.standing ?? "on the street"}. A stranger has stopped you.
 

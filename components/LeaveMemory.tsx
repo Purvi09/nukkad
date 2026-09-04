@@ -1,18 +1,22 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import StreetPhoto from "./StreetPhoto";
+import type { LatLon } from "../lib/geo";
 
 type Props = {
   /** The public place the memory will be pinned to. */
   place: string;
   city: string;
+  /** Where the writer is standing, for the photograph of the real street. */
+  at?: LatLon | null;
   onCancel: () => void;
   onPost: (text: string, photo?: string) => Promise<void>;
 };
 
 const MAX = 400;
 
-export default function LeaveMemory({ place, city, onCancel, onPost }: Props) {
+export default function LeaveMemory({ place, city, at, onCancel, onPost }: Props) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -83,6 +87,8 @@ export default function LeaveMemory({ place, city, onCancel, onPost }: Props) {
       <p className="panel-note">
         Something that happened to you here. Someone standing in this spot may find it one day.
       </p>
+
+      {at && <StreetPhoto lat={at.lat} lon={at.lon} title={place} />}
 
       <textarea
         ref={areaRef}

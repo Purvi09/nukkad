@@ -60,6 +60,10 @@ export async function POST(request: Request) {
   }));
 
   const parsed = await askGeminiJson<{ witnesses?: Array<Record<string, string>> }>({
+    // The round clock is held while this runs, but the player is still staring
+    // at an empty street. Past twenty seconds the unnamed locals will do.
+    timeoutMs: 12_000,
+    budgetMs: 20_000,
     prompt:
 `You are casting minor characters for a game set in the real streets of ${body.city ?? "this city"}.
 
@@ -101,8 +105,9 @@ People: ${JSON.stringify(manifest)}`,
       role: w?.role ?? role.role,
       look: w?.look ?? role.look,
       opener: w?.opener ?? role.opener,
-      // if the model dropped the detail, fall back to the plain true sentence
-      testimony: w?.testimony ?? factToWords(spot.fact),
+      // if the model dropped the detail, fall back to the plain true sentence;
+      // and never let a redaction mark reach a speech bubble
+      testimony: (w?.testimony ?? factToWords(spot.fact)).replace(/▁+/g, "the place"),
     };
   });
 

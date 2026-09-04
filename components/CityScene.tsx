@@ -1,7 +1,10 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { PX_PER_M, iso, type CityData, type Pose } from "../lib/geo";
+import {
+  PX_PER_M, iso, tileIndex, tileKey, MAX_TILE_INDEX, TILE_M, WORLD_LIMIT_M,
+  type CityData, type Dot, type Pose, type TileData, type Way,
+} from "../lib/geo";
 import { nearSound, stepSound } from "../lib/sound";
 
 type Props = {
@@ -14,7 +17,7 @@ type Props = {
   onNear: (id: string | null) => void;
   onTalk: (id: string) => void;
   /** Memories people left here, as pins you can walk up to. */
-  memories: Array<{ id: string; x: number; y: number }>;
+  memories: Array<{ id: string; x: number; y: number; photo?: boolean }>;
   /** Other people walking this city right now. */
   others: Array<{ uid: string; x: number; y: number; name: string; coat: number }>;
   onNearMemory: (id: string | null) => void;
@@ -28,12 +31,28 @@ type Props = {
   onCommit: (x: number, y: number) => void;
   onStreet: (where: { street: string | null; place: string | null }) => void;
   onInit?: (ok: boolean) => void;
+  /** Movement from an on-screen stick, merged with the keyboard each frame. */
+  touch?: { current: TouchInput };
+  /** Handles the page can call: zoom in and out without a wheel. */
+  api?: { current: SceneApi | null };
+  /** Fetch one tile beyond the initial payload. Null means "not now". */
+  loadTile?: (cx: number, cy: number) => Promise<TileData | null>;
 };
+
+/** Tiles this close to the player (nearest edge) are fetched and drawn. */
+const LOAD_RANGE = 600;
+/** Tiles this far behind the player are dropped again. */
+const UNLOAD_RANGE = 900;
+/** How many tile fetches may be in the air at once. */
+const MAX_IN_FLIGHT = 2;
+
+export type TouchInput = { sx: number; sy: number; run: boolean };
+export type SceneApi = { zoomBy: (factor: number) => void };
 
 
 const RUN_SPEED = 105;     // metres per second
 const SPRINT_MULT = 2.4;   // hold Shift
-const DEFAULT_ZOOM = 1.15; // close enough that a building is a building
+const DEFAULT_ZOOM = 2.0; // close enough that a block fills the view and a building is a building
 const MIN_ZOOM = 0.22;
 const MAX_ZOOM = 3.0;
 const MINIMAP_SIZE = 190;
@@ -60,16 +79,32 @@ const PIXEL = 0.45;
 /** Type sizes are pre-multiplied so they survive the downscale. */
 const FS = 1 / PIXEL;
 
-const LAND = 0xa9c98a;
+const LAND = 0xd8d2c2;
 const ROAD_FILL = 0x9aa1a8;
 const ROAD_EDGE = 0x6f767d;
 const WATER = 0x4d9fd6;
-const PARK = 0x76b957;
+const PARK = 0x8dbb70;
 const SHADOW = 0x4a5560;
 /** Walls stay pale; the roof carries the colour. That is the whole look. */
 const WALL = 0xf4efe4;
-/** Isometric cities read better when they are taller than life. */
+/**
+ * Isometric cities read better when they are taller than life, but only for
+ * the buildings that are tall in life. Boosting every house turns a street of
+ * two-storey flats into a canyon.
+ */
 const HEIGHT_BOOST = 2.1;
+const HOUSE_BOOST = 1.7;
+const TALL_KINDS = new Set([
+  "office", "commercial", "hotel", "hospital", "university", "college", "school", "industrial",
+  "warehouse", "place_of_worship", "temple", "mosque", "church", "cathedral", "theatre", "mall",
+  "retail", "supermarket", "public", "civic", "government", "train_station", "apartments",
+]);
+const boostFor = (kind: string) => (TALL_KINDS.has(kind) ? HEIGHT_BOOST : HOUSE_BOOST);
+
+/** Buildings this close to the player are in full colour; beyond FOCUS_FAR they haze. */
+const FOCUS_NEAR = 120;
+const FOCUS_FAR = 400;
+const HAZE_TINT = { r: 0xa6, g: 0xb4, b: 0xc4 };
 
 /** Roof colour, from whatever OSM knows about the building. */
 const PALETTE: Record<string, number> = {
@@ -102,13 +137,22 @@ const PALETTE: Record<string, number> = {
   construction: 0xb0a68f,
 };
 const DEFAULT_BUILDING = 0x6288b8;
-const MAX_LANDMARK_SIGNS = 500;
+/**
+ * Most buildings are tagged only "yes". A street of them in one colour is a
+ * carpet; in a handful of muted tones, chosen per building, it is a street.
+ */
+const ROOF_TONES = [0x6288b8, 0x6288b8, 0xb8705a, 0x8d939b, 0xc2a565, 0x7f9c72, 0x9c7f92, 0x6f93b9, 0xa88a6e];
+const PLAIN_KINDS = new Set(["yes", "house", "residential", "apartments", "detached", "terrace", "semidetached_house", "bungalow"]);
+const roofFor = (kind: string, seed: number) =>
+  PLAIN_KINDS.has(kind) ? ROOF_TONES[seed % ROOF_TONES.length] : (PALETTE[kind] ?? DEFAULT_BUILDING);
 
 /** Signs only show within this many metres of the player. */
 /** Labels are dropped entirely past this, to keep the working set small. */
 const SIGN_KEEP_RANGE = 900;
 /** Ceiling on labels drawn at once — enough to feel mapped, not papered. */
-const MAX_VISIBLE_SIGNS = 46;
+const MAX_VISIBLE_SIGNS = 14;
+/** Side-street names only appear this close to the player. */
+const MINOR_SIGN_RANGE = 150;
 const MAJOR_ROADS = new Set(["motorway", "trunk", "primary", "secondary", "tertiary"]);
 const PAVEMENT = 0xe3ddd0;
 /** Buildings you would otherwise be hidden behind fade to this. */
@@ -163,10 +207,13 @@ const insidePoly = (pts: number[], x: number, y: number) => {
 export default function CityScene({
   city, pose, witnesses, kit, onNear, onTalk,
   memories, others, onNearMemory, onReadMemory,
-  reveal, revealTitle, guess, frozen, onCommit, onStreet, onInit,
+  reveal, revealTitle, guess, frozen, onCommit, onStreet, onInit, touch, api, loadTile,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const playerRef = pose;
+  const touchRef = useRef(touch);
+  const apiRef = useRef(api);
+  const loadTileRef = useRef(loadTile);
 
   const frozenRef = useRef(frozen);
   const revealRef = useRef(reveal);
@@ -192,6 +239,9 @@ export default function CityScene({
     onReadMemoryRef.current = onReadMemory;
     onNearRef.current = onNear;
     onTalkRef.current = onTalk;
+    touchRef.current = touch;
+    apiRef.current = api;
+    loadTileRef.current = loadTile;
   });
 
   useEffect(() => { markerDrawRef.current?.(); }, [reveal, guess, revealTitle]);
@@ -242,7 +292,7 @@ export default function CityScene({
       const host = hostRef.current;
       if (!mounted || !host) return;
 
-      const { Application, Container, Graphics, Text } = PIXI;
+      const { Application, Container, Graphics, Text, Culler } = PIXI;
 
       try {
         app = new Application();
@@ -285,367 +335,662 @@ export default function CityScene({
       };
 
       // ---- land ------------------------------------------------------------
-      // The playable square, as a diamond once projected.
-      const r = city.radius;
+      // The ground goes as far as you can walk. Tiles paint parks and water on it.
+      const r = WORLD_LIMIT_M;
       const corners = [iso(-r, -r), iso(r, -r), iso(r, r), iso(-r, r)];
-      const ground = new Graphics()
-        .poly(corners.flatMap((c) => [c.x, c.y]))
-        .fill({ color: LAND });
+      world.addChild(new Graphics().poly(corners.flatMap((c) => [c.x, c.y])).fill({ color: LAND }));
 
-      city.parks.forEach((way) => {
-        const poly = polyToIso(way.pts);
-        if (poly.length >= 6) {
-          ground.poly(poly).fill({ color: PARK }).stroke({ width: 1.5, color: shade(PARK, 0.78), alpha: 0.8 });
-        }
-      });
-      city.water.forEach((way) => {
-        const poly = polyToIso(way.pts);
-        if (poly.length >= 6) {
-          ground.poly(poly).fill({ color: WATER }).stroke({ width: 2.5, color: shade(WATER, 0.75) });
-        }
-      });
-      world.addChild(ground);
-
-      // ---- streets ---------------------------------------------------------
-      const roadCasing = new Graphics();
-      const roadFill = new Graphics();
-      const segments: Array<{ x1: number; y1: number; x2: number; y2: number; name: string }> = [];
-
-      city.roads.forEach((way) => {
-        const style = ROAD_STYLE[way.kind] ?? ROAD_STYLE.residential;
-        const path = polyToIso(way.pts);
-        if (path.length < 4) return;
-
-        for (let i = 2; i < way.pts.length; i += 2) {
-          if (!way.name) break;
-          segments.push({
-            x1: way.pts[i - 2], y1: way.pts[i - 1],
-            x2: way.pts[i], y2: way.pts[i + 1],
-            name: way.name,
-          });
-        }
-
-        for (const [g, extra, color] of [
-          [roadCasing, 3, ROAD_EDGE],
-          [roadFill, 0, ROAD_FILL],
-        ] as const) {
-          g.moveTo(path[0], path[1]);
-          for (let i = 2; i < path.length; i += 2) g.lineTo(path[i], path[i + 1]);
-          g.stroke({ width: style.width + extra, color, cap: "round", join: "round" });
-        }
-
-        // dashed centre line down anything you would drive on
-        if (MAJOR_ROADS.has(way.kind)) {
-          for (let i = 0; i < path.length - 2; i += 2) {
-            const ax = path[i];
-            const ay = path[i + 1];
-            const bx = path[i + 2];
-            const by = path[i + 3];
-            const len = Math.hypot(bx - ax, by - ay);
-            const dashes = Math.floor(len / 14);
-            for (let d = 0; d < dashes; d++) {
-              const t0 = (d + 0.25) / dashes;
-              const t1 = (d + 0.7) / dashes;
-              roadFill
-                .moveTo(ax + (bx - ax) * t0, ay + (by - ay) * t0)
-                .lineTo(ax + (bx - ax) * t1, ay + (by - ay) * t1)
-                .stroke({ width: 1, color: 0xe8e0cd, alpha: 0.5 });
-            }
-          }
-        }
-      });
-      world.addChild(roadCasing, roadFill);
-
-      // ---- pavements -------------------------------------------------------
-      // A kerb around every block is what turns "gaps between shapes" into streets.
-      const pavement = new Graphics();
-      city.buildings.forEach((way) => {
-        const poly = polyToIso(way.pts);
-        if (poly.length >= 6) {
-          pavement.poly(poly).stroke({ width: 7, color: PAVEMENT, join: "round" });
-        }
-      });
-      world.addChild(pavement);
-
-      // ---- buildings, with their shadows -----------------------------------
-      // Sun sits high to the north-west, so every shadow falls down and right.
-      const shadows = new Graphics();
+      // ---- layers ----------------------------------------------------------
+      // The city arrives in tiles, added as you approach and dropped once they
+      // are far behind. Each tile draws into these shared layers, so the paint
+      // order never depends on which tile got here first: every kerb under
+      // every building, every road fill over every road edge.
+      const groundLayer = new Container();
+      const casingLayer = new Container();
+      const fillLayer = new Container();
+      const pavementLayer = new Container();
+      const shadowLayer = new Container();
       const blockLayer = new Container();
+      blockLayer.sortableChildren = true; // buildings sort by depth, whichever tile they came from
+      const foliageLayer = new Container();
+      const lampLayer = new Container();
+      const traffic = new Graphics();
+      world.addChild(
+        groundLayer, casingLayer, fillLayer, pavementLayer, shadowLayer,
+        blockLayer, foliageLayer, lampLayer, traffic,
+      );
+
+      // The time of day where the city is, from its longitude: a lamp-lit
+      // evening looks softer than noon, and hides density the way dusk does.
+      const dusk = new Graphics();
+      dusk.eventMode = "none";
+      app.stage.addChild(dusk);
+      const paintDusk = () => {
+        const hour = (((Date.now() / 3_600_000 + city.centre.lon / 15) % 24) + 24) % 24;
+        // 0 at midday, 1 deep night, with a warm hour either side
+        const night = hour < 5 ? 1 : hour < 7 ? (7 - hour) / 2 : hour < 18 ? 0 : hour < 21 ? (hour - 18) / 3 : 1;
+        const golden = (hour >= 6 && hour < 8) || (hour >= 17.5 && hour < 19.5) ? 1 : 0;
+        dusk.clear();
+        if (night > 0) dusk.rect(0, 0, app.screen.width, app.screen.height).fill({ color: 0x1b2a48, alpha: 0.42 * night });
+        if (golden > 0) dusk.rect(0, 0, app.screen.width, app.screen.height).fill({ color: 0xd08a4a, alpha: 0.12 });
+      };
+      paintDusk();
+
+      // Screen-space labels, above the world and below the minimap.
+      const labelLayer = new Container();
+      app.stage.addChild(labelLayer);
 
       type Block = {
         gfx: any;
+        /** world metres, for the focus haze */
+        wx: number;
+        wy: number;
         depth: number;
         minX: number;
         maxX: number;
         minY: number;
         maxY: number;
         faded: boolean;
+        /** 1 up close, fading toward the ground far off */
+        haze: number;
+        tile: string;
       };
-      const blockList: Block[] = [];
       const blockHash = new Map<string, Block[]>();
 
-      const ordered = city.buildings
-        .map((way) => {
-          let sx = 0;
-          let sy = 0;
-          const n = way.pts.length / 2;
-          for (let i = 0; i < way.pts.length; i += 2) { sx += way.pts[i]; sy += way.pts[i + 1]; }
-          return { way, depth: sx / n + sy / n };
-        })
-        .sort((a, b) => a.depth - b.depth);
+      type NamedSeg = { x1: number; y1: number; x2: number; y2: number; name: string };
+      const segmentsByTile = new Map<string, NamedSeg[]>();
+      const placesByTile = new Map<string, Array<{ name: string; x: number; y: number }>>();
+      const roadsByTile = new Map<string, Way[]>();
 
-      ordered.forEach(({ way, depth }, index) => {
-        // Most cities barely tag height, so guess a believable skyline instead of
-        // a flat carpet: what a building is FOR predicts how tall it stands.
-        const TALL = { office: 7, commercial: 5, hotel: 6, apartments: 4, retail: 2, hospital: 5, university: 4 } as Record<string, number>;
-        const guessedLevels = 2 + (TALL[way.kind] ?? 0) + ((index * 7919) % 5);
-        const metres = way.height ?? (way.levels ?? guessedLevels) * 3.3;
-        const h = Math.max(9, metres) * PX_PER_M * HEIGHT_BOOST;
-        const levels = Math.max(1, Math.min(12, way.levels ?? Math.round(metres / 3.2)));
-        const base = polyToIso(way.pts);
-        if (base.length < 6) return;
+      type Mover = { pts: number[]; seg: number; t: number; speed: number; dir: number; car: boolean; tone: number; tile: string };
+      const movers: Mover[] = [];
 
-        // its own object, so it can fade when it stands between you and the camera
-        const blocks = new Graphics();
+      type SignSpec = {
+        wx: number;
+        wy: number;
+        text: string;
+        ink: number;
+        board: number;
+        lift: number;
+        leader: boolean;
+        /** A side street: named only when you are standing on it. */
+        minor: boolean;
+        tile: string;
+      };
+      /**
+       * Signs are described up front but only built when you come near them.
+       * A city has hundreds of names; making every text texture at load would
+       * stall for seconds and hold memory for signs you never walk past.
+       */
+      const signSpecs = new Map<number, SignSpec>();
+      const signNodes = new Map<number, any>();
+      let nextSign = 0;
+      // street names, one per name per ~260m, across tiles
+      const placedNames = new Map<string, Array<{ x: number; y: number; tile: string }>>();
 
-        const points: Array<{ x: number; y: number }> = [];
-        for (let i = 0; i < base.length; i += 2) points.push({ x: base[i], y: base[i + 1] });
+      /**
+       * Map type, not signage: dark ink with a soft light halo so it stays
+       * readable over grass, tarmac or a roof, the way a paper map reads.
+       */
+      const mapLabel = (text: string, street: boolean) => {
+        const label = new Text({
+          text,
+          style: {
+            fill: street ? 0x39434f : 0x4a4034,
+            fontSize: street ? 12 : 11,
+            fontFamily: "ui-sans-serif, system-ui, -apple-system, sans-serif",
+            fontWeight: street ? "600" : "500",
+            letterSpacing: street ? 0.4 : 0.2,
+            stroke: { color: 0xf7f6ee, width: 3.5, join: "round" },
+          },
+        });
+        label.anchor.set(0.5);
+        label.resolution = 2;
+        return label;
+      };
 
-        // ground shadow: the footprint, pushed away from the sun
-        const offX = h * 0.5;
-        const offY = h * 0.26;
-        shadows
-          .poly(base.map((v, i) => (i % 2 === 0 ? v + offX : v + offY)))
-          .fill({ color: SHADOW, alpha: 0.3 });
+      // ---- collision and footing, bucketed by cell -------------------------
+      const cellKey = (x: number, y: number) =>
+        `${Math.floor(x / COLLIDE_CELL)},${Math.floor(y / COLLIDE_CELL)}`;
+      const solids = new Map<string, Array<{ tile: string; pts: number[] }>>();
+      type WalkSeg = { x1: number; y1: number; x2: number; y2: number; r: number; tile: string };
+      const walkHash = new Map<string, WalkSeg[]>();
+      const parkHash = new Map<string, Array<{ tile: string; pts: number[] }>>();
 
-        const tint = 0.92 + ((index % 9) * 0.022);
-        const roofColour = shade(PALETTE[way.kind] ?? DEFAULT_BUILDING, tint);
-        const body = shade(WALL, tint);
+      /** A way that straddles two tiles is drawn by whichever tile got here first. */
+      const owned = new Map<number, string>();
 
-        // walls, far ones first so near ones paint over them
-        const walls: Array<{ a: { x: number; y: number }; b: { x: number; y: number }; depth: number }> = [];
-        for (let i = 0; i < points.length; i++) {
-          const a = points[i];
-          const b = points[(i + 1) % points.length];
-          walls.push({ a, b, depth: a.y + b.y });
+      type LoadedTile = {
+        key: string;
+        cx: number;
+        cy: number;
+        gfx: any[];
+        blocks: Block[];
+        signs: number[];
+        ids: number[];
+        cells: { block: Set<string>; solid: Set<string>; walk: Set<string>; park: Set<string> };
+      };
+      const loaded = new Map<string, LoadedTile>();
+      /** Everything ever fetched, so walking back never fetches twice. */
+      const tileStore = new Map<string, TileData>();
+
+      const bucket = <T,>(hash: Map<string, T[]>, key: string, value: T, cells: Set<string>) => {
+        const list = hash.get(key) ?? [];
+        list.push(value);
+        hash.set(key, list);
+        cells.add(key);
+      };
+      const footprint = (pts: number[]) => {
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        for (let i = 0; i < pts.length; i += 2) {
+          minX = Math.min(minX, pts[i]);
+          maxX = Math.max(maxX, pts[i]);
+          minY = Math.min(minY, pts[i + 1]);
+          maxY = Math.max(maxY, pts[i + 1]);
         }
-        walls.sort((p, q) => p.depth - q.depth);
+        return { minX, minY, maxX, maxY, area: (maxX - minX) * (maxY - minY) };
+      };
+      const centroid = (pts: number[]) => {
+        let sx = 0;
+        let sy = 0;
+        const n = pts.length / 2;
+        for (let i = 0; i < pts.length; i += 2) { sx += pts[i]; sy += pts[i + 1]; }
+        return { x: sx / n, y: sy / n };
+      };
 
-        walls.forEach(({ a, b }) => {
-          // faces turned toward the lower right catch the light
-          const lit = b.x - a.x > 0;
-          const face = shade(body, lit ? 1.0 : 0.8);
-          blocks.poly([a.x, a.y, b.x, b.y, b.x, b.y - h, a.x, a.y - h]).fill({ color: face });
+      /**
+       * Full colour up close, a pale haze far off, so the eye finds "here".
+       * Tint can only darken, so the paleness comes from letting the ground
+       * show through; a touch of cool tint keeps it from looking merely faint.
+       */
+      const hazeAmount = (d: number) => Math.max(0, Math.min(1, (d - FOCUS_NEAR) / (FOCUS_FAR - FOCUS_NEAR)));
+      const hazeTint = (t: number) => {
+        const r = Math.round(255 + (HAZE_TINT.r - 255) * t);
+        const g = Math.round(255 + (HAZE_TINT.g - 255) * t);
+        const b = Math.round(255 + (HAZE_TINT.b - 255) * t);
+        return (r << 16) | (g << 8) | b;
+      };
+      const applyHaze = (block: Block, d: number) => {
+        const t = hazeAmount(d);
+        block.haze = 1 - 0.55 * t;
+        block.gfx.tint = hazeTint(t * 0.5);
+        if (!block.faded) block.gfx.alpha = block.haze;
+      };
+      let sinceFocus = 999;
+      const updateFocus = (dt: number) => {
+        sinceFocus += dt;
+        if (sinceFocus < 0.12) return;
+        sinceFocus = 0;
+        const { x, y } = playerRef.current;
+        for (const tile of loaded.values()) {
+          for (const block of tile.blocks) applyHaze(block, Math.hypot(block.wx - x, block.wy - y));
+        }
+      };
 
-          const span = Math.hypot(b.x - a.x, b.y - a.y);
+      const addTile = (data: TileData) => {
+        const key = tileKey(data.cx, data.cy);
+        if (loaded.has(key)) return;
+        const tile: LoadedTile = {
+          key, cx: data.cx, cy: data.cy, gfx: [], blocks: [], signs: [], ids: [],
+          cells: { block: new Set(), solid: new Set(), walk: new Set(), park: new Set() },
+        };
+        const random = rng(data.cx * 7919 + data.cy * 104729 + 17);
+        const claim = (way: Way) => {
+          if (way.id === undefined) return true;
+          const by = owned.get(way.id);
+          if (by && by !== key && loaded.has(by)) return false;
+          owned.set(way.id, key);
+          tile.ids.push(way.id);
+          return true;
+        };
+        const roads = data.roads.filter(claim);
+        const buildings = data.buildings.filter(claim);
+        const parks = data.parks.filter(claim);
+        const water = data.water.filter(claim);
+        const keep = (g: any, layer: any) => {
+          g.cullable = true;
+          layer.addChild(g);
+          tile.gfx.push(g);
+          return g;
+        };
 
-          // A grid of storey lines and bay lines reads as windows at this size,
-          // for a fraction of the cost of drawing every pane.
-          if (h > 12 && span > 10) {
-            const mullion = shade(roofColour, 0.85);
-            const storey = h / Math.max(1, levels);
-            for (let f = 1; f < levels; f++) {
-              const dy = storey * f;
-              blocks
-                .moveTo(a.x, a.y - dy)
-                .lineTo(b.x, b.y - dy)
-                .stroke({ width: 1, color: mullion, alpha: 0.8 });
+        // ---- ground --------------------------------------------------------
+        if (parks.length + water.length > 0) {
+          const ground = new Graphics();
+          parks.forEach((way) => {
+            const poly = polyToIso(way.pts);
+            if (poly.length >= 6) {
+              ground.poly(poly).fill({ color: PARK }).stroke({ width: 1.5, color: shade(PARK, 0.78), alpha: 0.8 });
             }
-            const bays = Math.min(9, Math.max(1, Math.round(span / 13)));
-            for (let v = 1; v < bays; v++) {
-              const t = v / bays;
-              const px = a.x + (b.x - a.x) * t;
-              const py = a.y + (b.y - a.y) * t;
-              blocks
-                .moveTo(px, py)
-                .lineTo(px, py - h)
-                .stroke({ width: 1, color: mullion, alpha: 0.55 });
+          });
+          water.forEach((way) => {
+            const poly = polyToIso(way.pts);
+            if (poly.length >= 6) {
+              ground.poly(poly).fill({ color: WATER }).stroke({ width: 2.5, color: shade(WATER, 0.75) });
             }
+          });
+          keep(ground, groundLayer);
+        }
+
+        // ---- streets -------------------------------------------------------
+        const roadCasing = new Graphics();
+        const roadFill = new Graphics();
+        const segments: NamedSeg[] = [];
+        roads.forEach((way) => {
+          const style = ROAD_STYLE[way.kind] ?? ROAD_STYLE.residential;
+          const path = polyToIso(way.pts);
+          if (path.length < 4) return;
+
+          for (let i = 2; i < way.pts.length; i += 2) {
+            if (!way.name) break;
+            segments.push({
+              x1: way.pts[i - 2], y1: way.pts[i - 1],
+              x2: way.pts[i], y2: way.pts[i + 1],
+              name: way.name,
+            });
           }
 
-          // ambient shade where the wall meets the ground, then a crisp outline
-          blocks
-            .poly([a.x, a.y, b.x, b.y, b.x, b.y - 5, a.x, a.y - 5])
-            .fill({ color: SHADOW, alpha: 0.16 });
-          blocks.moveTo(a.x, a.y).lineTo(b.x, b.y)
-            .stroke({ width: 1, color: 0x5b6570, alpha: 0.5 });
-        });
+          for (const [g, extra, color] of [
+            [roadCasing, 3, ROAD_EDGE],
+            [roadFill, 0, ROAD_FILL],
+          ] as const) {
+            g.moveTo(path[0], path[1]);
+            for (let i = 2; i < path.length; i += 2) g.lineTo(path[i], path[i + 1]);
+            g.stroke({ width: style.width + extra, color, cap: "round", join: "round" });
+          }
 
-        // lit ground floor for anything that trades at street level
-        if (SHOPFRONTS.has(way.kind) && h > 12) {
-          const bandTop = Math.min(h, 9);
-          walls.forEach(({ a, b }) => {
-            if (b.x - a.x <= 0) return; // only the faces you can see into
-            blocks
-              .poly([a.x, a.y, b.x, b.y, b.x, b.y - bandTop, a.x, a.y - bandTop])
-              .fill({ color: 0x4a3a2c, alpha: 0.85 });
-            const steps = Math.max(1, Math.floor(Math.hypot(b.x - a.x, b.y - a.y) / 12));
-            for (let w = 0; w < steps; w++) {
-              const t0 = (w + 0.25) / steps;
-              const t1 = (w + 0.75) / steps;
-              const p0 = { x: a.x + (b.x - a.x) * t0, y: a.y + (b.y - a.y) * t0 };
-              const p1 = { x: a.x + (b.x - a.x) * t1, y: a.y + (b.y - a.y) * t1 };
-              blocks
-                .poly([p0.x, p0.y - 2, p1.x, p1.y - 2, p1.x, p1.y - bandTop + 2, p0.x, p0.y - bandTop + 2])
-                .fill({ color: 0xffd99a, alpha: 0.75 });
+          // dashed centre line down anything you would drive on
+          if (MAJOR_ROADS.has(way.kind)) {
+            for (let i = 0; i < path.length - 2; i += 2) {
+              const ax = path[i];
+              const ay = path[i + 1];
+              const bx = path[i + 2];
+              const by = path[i + 3];
+              const len = Math.hypot(bx - ax, by - ay);
+              const dashes = Math.floor(len / 14);
+              for (let d = 0; d < dashes; d++) {
+                const t0 = (d + 0.25) / dashes;
+                const t1 = (d + 0.7) / dashes;
+                roadFill
+                  .moveTo(ax + (bx - ax) * t0, ay + (by - ay) * t0)
+                  .lineTo(ax + (bx - ax) * t1, ay + (by - ay) * t1)
+                  .stroke({ width: 1, color: 0xe8e0cd, alpha: 0.5 });
+              }
             }
+          }
+        });
+        keep(roadCasing, casingLayer);
+        keep(roadFill, fillLayer);
+        segmentsByTile.set(key, segments);
+        roadsByTile.set(key, roads);
+
+        // ---- pavements -----------------------------------------------------
+        // A kerb around every block is what turns "gaps between shapes" into streets.
+        const pavement = new Graphics();
+        buildings.forEach((way) => {
+          const poly = polyToIso(way.pts);
+          if (poly.length >= 6) pavement.poly(poly).stroke({ width: 7, color: PAVEMENT, join: "round" });
+        });
+        keep(pavement, pavementLayer);
+
+        // ---- buildings, with their shadows ---------------------------------
+        // Sun sits high to the north-west, so every shadow falls down and right.
+        const shadows = new Graphics();
+        const ordered = buildings
+          .map((way) => { const c = centroid(way.pts); return { way, depth: c.x + c.y, wx: c.x, wy: c.y }; })
+          .sort((a, b) => a.depth - b.depth);
+
+        ordered.forEach(({ way, depth, wx, wy }, index) => {
+          // Most cities barely tag height, so guess a believable skyline instead of
+          // a flat carpet: what a building is FOR predicts how tall it stands.
+          const TALL = { office: 7, commercial: 5, hotel: 6, apartments: 4, retail: 2, hospital: 5, university: 4 } as Record<string, number>;
+          const salt = (way.id ?? index) % 5;
+          const guessedLevels = 2 + (TALL[way.kind] ?? 0) + salt;
+          const metres = way.height ?? (way.levels ?? guessedLevels) * 3.3;
+          const h = Math.max(9, metres) * PX_PER_M * boostFor(way.kind);
+          const levels = Math.max(1, Math.min(12, way.levels ?? Math.round(metres / 3.2)));
+          const base = polyToIso(way.pts);
+          if (base.length < 6) return;
+
+          // its own object, so it can fade when it stands between you and the camera
+          const blocks = new Graphics();
+
+          const points: Array<{ x: number; y: number }> = [];
+          for (let i = 0; i < base.length; i += 2) points.push({ x: base[i], y: base[i + 1] });
+
+          // ground shadow: the footprint, pushed away from the sun
+          const offX = h * 0.5;
+          const offY = h * 0.26;
+          shadows
+            .poly(base.map((v, i) => (i % 2 === 0 ? v + offX : v + offY)))
+            .fill({ color: SHADOW, alpha: 0.3 });
+
+          const tint = 0.92 + (((way.id ?? index) % 9) * 0.022);
+          const roofColour = shade(roofFor(way.kind, (way.id ?? index) % 97), tint);
+          const body = shade(WALL, tint);
+
+          // walls, far ones first so near ones paint over them
+          const walls: Array<{ a: { x: number; y: number }; b: { x: number; y: number }; depth: number }> = [];
+          for (let i = 0; i < points.length; i++) {
+            const a = points[i];
+            const b = points[(i + 1) % points.length];
+            walls.push({ a, b, depth: a.y + b.y });
+          }
+          walls.sort((p, q) => p.depth - q.depth);
+
+          walls.forEach(({ a, b }) => {
+            // faces turned toward the lower right catch the light
+            const lit = b.x - a.x > 0;
+            const face = shade(body, lit ? 1.0 : 0.8);
+            blocks.poly([a.x, a.y, b.x, b.y, b.x, b.y - h, a.x, a.y - h]).fill({ color: face });
+
+            const span = Math.hypot(b.x - a.x, b.y - a.y);
+
+            // A grid of storey lines and bay lines reads as windows at this size,
+            // for a fraction of the cost of drawing every pane.
+            if (h > 12 && span > 10) {
+              const mullion = shade(roofColour, 0.85);
+              const storey = h / Math.max(1, levels);
+              for (let f = 1; f < levels; f++) {
+                const dy = storey * f;
+                blocks
+                  .moveTo(a.x, a.y - dy)
+                  .lineTo(b.x, b.y - dy)
+                  .stroke({ width: 1, color: mullion, alpha: 0.8 });
+              }
+              const bays = Math.min(9, Math.max(1, Math.round(span / 13)));
+              for (let v = 1; v < bays; v++) {
+                const t = v / bays;
+                const px = a.x + (b.x - a.x) * t;
+                const py = a.y + (b.y - a.y) * t;
+                blocks
+                  .moveTo(px, py)
+                  .lineTo(px, py - h)
+                  .stroke({ width: 1, color: mullion, alpha: 0.55 });
+              }
+            }
+
+            // ambient shade where the wall meets the ground, then a crisp outline
+            blocks
+              .poly([a.x, a.y, b.x, b.y, b.x, b.y - 5, a.x, a.y - 5])
+              .fill({ color: SHADOW, alpha: 0.16 });
+            blocks.moveTo(a.x, a.y).lineTo(b.x, b.y)
+              .stroke({ width: 1, color: 0x5b6570, alpha: 0.5 });
+          });
+
+          // lit ground floor for anything that trades at street level
+          if (SHOPFRONTS.has(way.kind) && h > 12) {
+            const bandTop = Math.min(h, 9);
+            walls.forEach(({ a, b }) => {
+              if (b.x - a.x <= 0) return; // only the faces you can see into
+              blocks
+                .poly([a.x, a.y, b.x, b.y, b.x, b.y - bandTop, a.x, a.y - bandTop])
+                .fill({ color: 0x4a3a2c, alpha: 0.85 });
+              const steps = Math.max(1, Math.floor(Math.hypot(b.x - a.x, b.y - a.y) / 12));
+              for (let w = 0; w < steps; w++) {
+                const t0 = (w + 0.25) / steps;
+                const t1 = (w + 0.75) / steps;
+                const p0 = { x: a.x + (b.x - a.x) * t0, y: a.y + (b.y - a.y) * t0 };
+                const p1 = { x: a.x + (b.x - a.x) * t1, y: a.y + (b.y - a.y) * t1 };
+                blocks
+                  .poly([p0.x, p0.y - 2, p1.x, p1.y - 2, p1.x, p1.y - bandTop + 2, p0.x, p0.y - bandTop + 2])
+                  .fill({ color: 0xffd99a, alpha: 0.75 });
+              }
+            });
+          }
+
+          // roof, with a parapet edge
+          const roof = base.map((v, i) => (i % 2 === 0 ? v : v - h));
+          // the roof is the only saturated surface, which is what makes it pop
+          blocks
+            .poly(roof)
+            .fill({ color: roofColour })
+            .stroke({ width: 1.5, color: shade(roofColour, 0.62), alpha: 1 });
+
+          blocks.zIndex = depth;
+          keep(blocks, blockLayer);
+
+          let minX = Infinity;
+          let maxX = -Infinity;
+          let minY = Infinity;
+          let maxY = -Infinity;
+          points.forEach((pt) => {
+            minX = Math.min(minX, pt.x);
+            maxX = Math.max(maxX, pt.x);
+            minY = Math.min(minY, pt.y - h);
+            maxY = Math.max(maxY, pt.y);
+          });
+
+          const block: Block = { gfx: blocks, wx, wy, depth, minX, maxX, minY, maxY, faded: false, haze: 1, tile: key };
+          applyHaze(block, Math.hypot(wx - playerRef.current.x, wy - playerRef.current.y));
+          tile.blocks.push(block);
+
+          // bucket it in world metres so the fade test only looks at what is close
+          const fp = footprint(way.pts);
+          for (let cx = Math.floor(fp.minX / FADE_RADIUS); cx <= Math.floor(fp.maxX / FADE_RADIUS); cx++) {
+            for (let cy = Math.floor(fp.minY / FADE_RADIUS); cy <= Math.floor(fp.maxY / FADE_RADIUS); cy++) {
+              bucket(blockHash, `${cx},${cy}`, block, tile.cells.block);
+            }
+          }
+          // and for collision
+          for (let cx = Math.floor(fp.minX / COLLIDE_CELL); cx <= Math.floor(fp.maxX / COLLIDE_CELL); cx++) {
+            for (let cy = Math.floor(fp.minY / COLLIDE_CELL); cy <= Math.floor(fp.maxY / COLLIDE_CELL); cy++) {
+              bucket(solids, `${cx},${cy}`, { tile: key, pts: way.pts }, tile.cells.solid);
+            }
+          }
+        });
+        keep(shadows, shadowLayer);
+
+        // ---- trees ---------------------------------------------------------
+        // OSM's own trees, plus a deterministic scatter to fill out parks.
+        const foliage = new Graphics();
+        const spots: Array<{ x: number; y: number; size: number }> = [];
+        data.trees.forEach((t: Dot) => spots.push({ x: t.x, y: t.y, size: 1 + random() * 0.4 }));
+        parks.forEach((park) => {
+          const fp = footprint(park.pts);
+          const wanted = Math.min(90, Math.floor(Math.max(0, fp.area) / 900));
+          for (let n = 0, tries = 0; n < wanted && tries < wanted * 6; tries++) {
+            const x = fp.minX + random() * (fp.maxX - fp.minX);
+            const y = fp.minY + random() * (fp.maxY - fp.minY);
+            if (!insidePoly(park.pts, x, y)) continue;
+            spots.push({ x, y, size: 0.9 + random() * 0.5 });
+            n++;
+          }
+        });
+        spots
+          .sort((a, b) => a.x + a.y - (b.x + b.y))
+          .slice(0, 600)
+          .forEach((spot) => {
+            const p = iso(spot.x, spot.y);
+            const sz = spot.size;
+            foliage.ellipse(p.x + 3, p.y + 1, 6 * sz, 3 * sz).fill({ color: SHADOW, alpha: 0.22 });
+            foliage.rect(p.x - 1, p.y - 7 * sz, 2, 7 * sz).fill({ color: 0x6b5335 });
+            foliage.circle(p.x, p.y - 10 * sz, 6 * sz).fill({ color: 0x4f7f3c });
+            foliage.circle(p.x - 3 * sz, p.y - 8 * sz, 4.5 * sz).fill({ color: 0x5f9247 });
+            foliage.circle(p.x + 2 * sz, p.y - 12 * sz, 4 * sz).fill({ color: 0x74a856 });
+          });
+        keep(foliage, foliageLayer);
+
+        // ---- street lamps --------------------------------------------------
+        // Verticals along the kerb give the street a rhythm and a sense of height.
+        const lamps = new Graphics();
+        roads.forEach((way, wayIndex) => {
+          if (!MAJOR_ROADS.has(way.kind) || wayIndex % 2 === 1) return;
+          for (let i = 0; i < way.pts.length - 2; i += 2) {
+            const ax = way.pts[i];
+            const ay = way.pts[i + 1];
+            const bx = way.pts[i + 2];
+            const by = way.pts[i + 3];
+            const len = Math.hypot(bx - ax, by - ay);
+            const count = Math.floor(len / 55);
+            for (let n = 0; n < count; n++) {
+              const t = (n + 0.5) / count;
+              // step off the carriageway onto the kerb
+              const nx = -(by - ay) / (len || 1);
+              const ny = (bx - ax) / (len || 1);
+              const p = iso(ax + (bx - ax) * t + nx * 7, ay + (by - ay) * t + ny * 7);
+              lamps.ellipse(p.x + 2, p.y + 1, 4, 2).fill({ color: SHADOW, alpha: 0.2 });
+              lamps.rect(p.x - 1, p.y - 22, 2, 22).fill({ color: 0x4c4740 });
+              lamps.rect(p.x - 1, p.y - 24, 7, 2).fill({ color: 0x4c4740 });
+              lamps.circle(p.x + 6, p.y - 22, 2.5).fill({ color: 0xffe9b0 });
+            }
+          }
+        });
+        keep(lamps, lampLayer);
+
+        // ---- traffic and pedestrians ----------------------------------------
+        // Nothing makes a city feel dead like an empty one.
+        const driveable = roads.filter((w) => MAJOR_ROADS.has(w.kind) && w.pts.length >= 6);
+        const strollable = roads.filter((w) => w.pts.length >= 6);
+        for (let i = 0; i < Math.min(2, driveable.length); i++) {
+          const way = driveable[Math.floor(random() * driveable.length)];
+          movers.push({
+            pts: way.pts,
+            seg: Math.floor(random() * (way.pts.length / 2 - 1)),
+            t: random(),
+            speed: 9 + random() * 7,
+            dir: random() > 0.5 ? 1 : -1,
+            car: true,
+            tone: Math.floor(random() * 6),
+            tile: key,
+          });
+        }
+        for (let i = 0; i < Math.min(4, strollable.length); i++) {
+          const way = strollable[Math.floor(random() * strollable.length)];
+          movers.push({
+            pts: way.pts,
+            seg: Math.floor(random() * (way.pts.length / 2 - 1)),
+            t: random(),
+            speed: 1.3 + random() * 1.1,
+            dir: random() > 0.5 ? 1 : -1,
+            car: false,
+            tone: Math.floor(random() * 6),
+            tile: key,
           });
         }
 
-        // roof, with a parapet edge
-        const roof = base.map((v, i) => (i % 2 === 0 ? v : v - h));
-        // the roof is the only saturated surface, which is what makes it pop
-        blocks
-          .poly(roof)
-          .fill({ color: roofColour })
-          .stroke({ width: 1.5, color: shade(roofColour, 0.62), alpha: 1 });
+        // ---- names, for the "where am I" readout -----------------------------
+        const places: Array<{ name: string; x: number; y: number }> = [];
+        const noteName = (way: Way) => { if (way.name) places.push({ name: way.name, ...centroid(way.pts) }); };
+        buildings.forEach(noteName);
+        parks.forEach(noteName);
+        water.forEach(noteName);
+        placesByTile.set(key, places);
 
-        blockLayer.addChild(blocks);
-
-        let minX = Infinity;
-        let maxX = -Infinity;
-        let minY = Infinity;
-        let maxY = -Infinity;
-        points.forEach((pt) => {
-          minX = Math.min(minX, pt.x);
-          maxX = Math.max(maxX, pt.x);
-          minY = Math.min(minY, pt.y - h);
-          maxY = Math.max(maxY, pt.y);
-        });
-
-        const block: Block = { gfx: blocks, depth, minX, maxX, minY, maxY, faded: false };
-        blockList.push(block);
-
-        // bucket it in world metres so the fade test only looks at what is close
-        let wMinX = Infinity;
-        let wMaxX = -Infinity;
-        let wMinY = Infinity;
-        let wMaxY = -Infinity;
-        for (let i = 0; i < way.pts.length; i += 2) {
-          wMinX = Math.min(wMinX, way.pts[i]);
-          wMaxX = Math.max(wMaxX, way.pts[i]);
-          wMinY = Math.min(wMinY, way.pts[i + 1]);
-          wMaxY = Math.max(wMaxY, way.pts[i + 1]);
-        }
-        for (let cx = Math.floor(wMinX / FADE_RADIUS); cx <= Math.floor(wMaxX / FADE_RADIUS); cx++) {
-          for (let cy = Math.floor(wMinY / FADE_RADIUS); cy <= Math.floor(wMaxY / FADE_RADIUS); cy++) {
-            const key = `${cx},${cy}`;
-            const bucket = blockHash.get(key) ?? [];
-            bucket.push(block);
-            blockHash.set(key, bucket);
+        // ---- signage ---------------------------------------------------------
+        const sign = (spec: Omit<SignSpec, "tile">) => {
+          const id = nextSign++;
+          signSpecs.set(id, { ...spec, tile: key });
+          tile.signs.push(id);
+        };
+        roads.forEach((way) => {
+          if (!way.name || way.pts.length < 4) return;
+          let best = { i: 0, len: 0 };
+          for (let i = 0; i < way.pts.length - 2; i += 2) {
+            const len = Math.hypot(way.pts[i + 2] - way.pts[i], way.pts[i + 3] - way.pts[i + 1]);
+            if (len > best.len) best = { i, len };
           }
-        }
-      });
-
-      world.addChild(shadows, blockLayer);
-
-      // ---- trees -----------------------------------------------------------
-      // OSM's own trees, plus a deterministic scatter to fill out parks.
-      const foliage = new Graphics();
-      const spots: Array<{ x: number; y: number; size: number }> = [];
-      const random = rng(city.roads.length + city.buildings.length);
-
-      city.trees.forEach((t) => spots.push({ x: t.x, y: t.y, size: 1 + random() * 0.4 }));
-
-      city.parks.forEach((park) => {
-        let minX = Infinity;
-        let minY = Infinity;
-        let maxX = -Infinity;
-        let maxY = -Infinity;
-        for (let i = 0; i < park.pts.length; i += 2) {
-          minX = Math.min(minX, park.pts[i]);
-          maxX = Math.max(maxX, park.pts[i]);
-          minY = Math.min(minY, park.pts[i + 1]);
-          maxY = Math.max(maxY, park.pts[i + 1]);
-        }
-        const area = Math.max(0, (maxX - minX) * (maxY - minY));
-        const wanted = Math.min(90, Math.floor(area / 900));
-        for (let n = 0, tries = 0; n < wanted && tries < wanted * 6; tries++) {
-          const x = minX + random() * (maxX - minX);
-          const y = minY + random() * (maxY - minY);
-          if (!insidePoly(park.pts, x, y)) continue;
-          spots.push({ x, y, size: 0.9 + random() * 0.5 });
-          n++;
-        }
-      });
-
-      spots
-        .sort((a, b) => a.x + a.y - (b.x + b.y))
-        .slice(0, 3200)
-        .forEach((spot) => {
-          const p = iso(spot.x, spot.y);
-          const s = spot.size;
-          foliage.ellipse(p.x + 3, p.y + 1, 6 * s, 3 * s).fill({ color: SHADOW, alpha: 0.22 });
-          foliage.rect(p.x - 1, p.y - 7 * s, 2, 7 * s).fill({ color: 0x6b5335 });
-          foliage.circle(p.x, p.y - 10 * s, 6 * s).fill({ color: 0x4f7f3c });
-          foliage.circle(p.x - 3 * s, p.y - 8 * s, 4.5 * s).fill({ color: 0x5f9247 });
-          foliage.circle(p.x + 2 * s, p.y - 12 * s, 4 * s).fill({ color: 0x74a856 });
+          if (best.len < 22) return;
+          const mid = {
+            x: (way.pts[best.i] + way.pts[best.i + 2]) / 2,
+            y: (way.pts[best.i + 1] + way.pts[best.i + 3]) / 2,
+          };
+          const placed = placedNames.get(way.name) ?? [];
+          if (placed.some((p) => Math.hypot(p.x - mid.x, p.y - mid.y) < 260)) return;
+          placed.push({ ...mid, tile: key });
+          placedNames.set(way.name, placed);
+          sign({
+            wx: mid.x, wy: mid.y, text: way.name.toUpperCase(), ink: 0xf3e6d2, board: 0x39424c,
+            lift: 10, leader: false, minor: !MAJOR_ROADS.has(way.kind),
+          });
         });
-      world.addChild(foliage);
+        const landmark = (pts: number[], name: string, board: number) => {
+          const c = centroid(pts);
+          sign({
+            wx: c.x, wy: c.y,
+            text: (name.length > 30 ? `${name.slice(0, 28)}…` : name).toUpperCase(),
+            ink: 0xfff3df, board, lift: 40, leader: true, minor: false,
+          });
+        };
+        water.forEach((w) => { if (w.name) landmark(w.pts, w.name, 0x2f5a7a); });
+        parks.forEach((w) => { if (w.name) landmark(w.pts, w.name, 0x3a5c30); });
+        // biggest named buildings only — a city has hundreds, a skyline has a few
+        buildings
+          .filter((w) => w.name)
+          .sort((a, b) => footprint(b.pts).area - footprint(a.pts).area)
+          .slice(0, 24)
+          .forEach((w) => landmark(w.pts, w.name as string, 0x6b3f2a));
 
-      // ---- street lamps ----------------------------------------------------
-      // Verticals along the kerb give the street a rhythm and a sense of height.
-      const lamps = new Graphics();
-      city.roads.forEach((way, wayIndex) => {
-        if (!MAJOR_ROADS.has(way.kind) || wayIndex % 2 === 1) return;
-        for (let i = 0; i < way.pts.length - 2; i += 2) {
-          const ax = way.pts[i];
-          const ay = way.pts[i + 1];
-          const bx = way.pts[i + 2];
-          const by = way.pts[i + 3];
-          const len = Math.hypot(bx - ax, by - ay);
-          const count = Math.floor(len / 55);
-          for (let n = 0; n < count; n++) {
-            const t = (n + 0.5) / count;
-            // step off the carriageway onto the kerb
-            const nx = -(by - ay) / (len || 1);
-            const ny = (bx - ax) / (len || 1);
-            const p = iso(ax + (bx - ax) * t + nx * 7, ay + (by - ay) * t + ny * 7);
-            lamps.ellipse(p.x + 2, p.y + 1, 4, 2).fill({ color: SHADOW, alpha: 0.2 });
-            lamps.rect(p.x - 1, p.y - 22, 2, 22).fill({ color: 0x4c4740 });
-            lamps.rect(p.x - 1, p.y - 24, 7, 2).fill({ color: 0x4c4740 });
-            lamps.circle(p.x + 6, p.y - 22, 2.5).fill({ color: 0xffe9b0 });
+        // ---- where you may stand: roads, footways, and the inside of parks ---
+        roads.forEach((way) => {
+          const rw = WALK_WIDTH[way.kind] ?? DEFAULT_WALK_WIDTH;
+          for (let i = 0; i < way.pts.length - 2; i += 2) {
+            const seg: WalkSeg = { x1: way.pts[i], y1: way.pts[i + 1], x2: way.pts[i + 2], y2: way.pts[i + 3], r: rw, tile: key };
+            const minX = Math.min(seg.x1, seg.x2) - rw;
+            const maxX = Math.max(seg.x1, seg.x2) + rw;
+            const minY = Math.min(seg.y1, seg.y2) - rw;
+            const maxY = Math.max(seg.y1, seg.y2) + rw;
+            for (let cx = Math.floor(minX / WALK_CELL); cx <= Math.floor(maxX / WALK_CELL); cx++) {
+              for (let cy = Math.floor(minY / WALK_CELL); cy <= Math.floor(maxY / WALK_CELL); cy++) {
+                bucket(walkHash, `${cx},${cy}`, seg, tile.cells.walk);
+              }
+            }
           }
+        });
+        parks.forEach((park) => {
+          const fp = footprint(park.pts);
+          for (let cx = Math.floor(fp.minX / WALK_CELL); cx <= Math.floor(fp.maxX / WALK_CELL); cx++) {
+            for (let cy = Math.floor(fp.minY / WALK_CELL); cy <= Math.floor(fp.maxY / WALK_CELL); cy++) {
+              bucket(parkHash, `${cx},${cy}`, { tile: key, pts: park.pts }, tile.cells.park);
+            }
+          }
+        });
+
+        loaded.set(key, tile);
+      };
+
+      const unbucket = <T extends { tile: string }>(hash: Map<string, T[]>, cells: Set<string>, key: string) => {
+        for (const cell of cells) {
+          const list = hash.get(cell);
+          if (!list) continue;
+          const kept = list.filter((entry) => entry.tile !== key);
+          if (kept.length > 0) hash.set(cell, kept); else hash.delete(cell);
         }
-      });
-      world.addChild(lamps);
+      };
 
-      // ---- traffic and pedestrians -----------------------------------------
-      // Nothing makes a city feel dead like an empty one.
-      type Mover = { pts: number[]; seg: number; t: number; speed: number; dir: number; car: boolean; tone: number };
-      const movers: Mover[] = [];
-      const traffic = new Graphics();
-      world.addChild(traffic);
-
-      const driveable = city.roads.filter((w) => MAJOR_ROADS.has(w.kind) && w.pts.length >= 6);
-      const strollable = city.roads.filter((w) => w.pts.length >= 6);
-
-      for (let i = 0; i < Math.min(55, driveable.length); i++) {
-        const way = driveable[Math.floor(random() * driveable.length)];
-        movers.push({
-          pts: way.pts,
-          seg: Math.floor(random() * (way.pts.length / 2 - 1)),
-          t: random(),
-          speed: 9 + random() * 7,
-          dir: random() > 0.5 ? 1 : -1,
-          car: true,
-          tone: Math.floor(random() * 6),
+      const removeTile = (key: string) => {
+        const tile = loaded.get(key);
+        if (!tile) return;
+        loaded.delete(key);
+        for (const g of tile.gfx) {
+          g.parent?.removeChild(g);
+          g.destroy({ children: true });
+        }
+        unbucket(blockHash, tile.cells.block, key);
+        unbucket(solids, tile.cells.solid, key);
+        unbucket(walkHash, tile.cells.walk, key);
+        unbucket(parkHash, tile.cells.park, key);
+        segmentsByTile.delete(key);
+        placesByTile.delete(key);
+        roadsByTile.delete(key);
+        for (let i = movers.length - 1; i >= 0; i--) if (movers[i].tile === key) movers.splice(i, 1);
+        for (const id of tile.signs) {
+          signSpecs.delete(id);
+          const node = signNodes.get(id);
+          if (node) { labelLayer.removeChild(node); node.destroy({ children: true }); signNodes.delete(id); }
+        }
+        placedNames.forEach((list, name) => {
+          const kept = list.filter((p) => p.tile !== key);
+          if (kept.length > 0) placedNames.set(name, kept); else placedNames.delete(name);
         });
-      }
-      // A city is people. Pull them from all over the street network so they
-      // head in every direction rather than shuttling down one avenue.
-      for (let i = 0; i < Math.min(150, strollable.length); i++) {
-        const way = strollable[Math.floor(random() * strollable.length)];
-        movers.push({
-          pts: way.pts,
-          seg: Math.floor(random() * (way.pts.length / 2 - 1)),
-          t: random(),
-          speed: 1.3 + random() * 1.1,
-          dir: random() > 0.5 ? 1 : -1,
-          car: false,
-          tone: Math.floor(random() * 6),
-        });
-      }
+        for (const id of tile.ids) if (owned.get(id) === key) owned.delete(id);
+        for (let i = fadedNow.length - 1; i >= 0; i--) if (fadedNow[i].tile === key) fadedNow.splice(i, 1);
+      };
+      /** Blocks currently ghosted, so they can be restored next frame. */
+      const fadedNow: Block[] = [];
 
       const stepMovers = (dt: number) => {
         traffic.clear();
@@ -677,149 +1022,96 @@ export default function CityScene({
           const ny = (bx - ax) / len;
           const p = iso(wx + nx * offset, wy + ny * offset);
 
+          // Drawn at something like human scale next to the houses: a person is
+          // not as tall as a building, and a city of giants is not a city.
           if (m.car) {
-            traffic.ellipse(p.x + 2, p.y + 1, 7, 3.5).fill({ color: SHADOW, alpha: 0.3 });
-            traffic.rect(p.x - 6, p.y - 8, 12, 8).fill({ color: CAR_TONES[m.tone] });
-            traffic.rect(p.x - 6, p.y - 11, 12, 3).fill({ color: 0xd8e6f2 });
-            traffic.rect(p.x - 6, p.y - 8, 12, 1).fill({ color: 0x2b3440, alpha: 0.4 });
+            const c = 0.7;
+            traffic.ellipse(p.x + 2 * c, p.y + 1, 7 * c, 3.5 * c).fill({ color: SHADOW, alpha: 0.3 });
+            traffic.rect(p.x - 6 * c, p.y - 8 * c, 12 * c, 8 * c).fill({ color: CAR_TONES[m.tone] });
+            traffic.rect(p.x - 6 * c, p.y - 11 * c, 12 * c, 3 * c).fill({ color: 0xd8e6f2 });
+            traffic.rect(p.x - 6 * c, p.y - 8 * c, 12 * c, 1).fill({ color: 0x2b3440, alpha: 0.4 });
           } else {
-            // a walker: shadow, legs, coat, head — small, but unmistakably a person
+            const w = 0.55;
             const coat = COAT_TONES[m.tone];
-            traffic.ellipse(p.x + 1, p.y, 4, 2).fill({ color: SHADOW, alpha: 0.3 });
-            traffic.rect(p.x - 2, p.y - 5, 4, 5).fill({ color: 0x3c4450 });
-            traffic.rect(p.x - 3, p.y - 12, 6, 7).fill({ color: coat });
-            traffic.rect(p.x - 3, p.y - 12, 6, 1).fill({ color: 0x000000, alpha: 0.18 });
-            traffic.circle(p.x, p.y - 14.5, 3).fill({ color: 0xf1cfa8 });
-            traffic.rect(p.x - 3, p.y - 16.5, 6, 2).fill({ color: shade(coat, 0.7) });
+            traffic.ellipse(p.x + 1, p.y, 4 * w, 2 * w).fill({ color: SHADOW, alpha: 0.3 });
+            traffic.rect(p.x - 2 * w, p.y - 5 * w, 4 * w, 5 * w).fill({ color: 0x3c4450 });
+            traffic.rect(p.x - 3 * w, p.y - 12 * w, 6 * w, 7 * w).fill({ color: coat });
+            traffic.circle(p.x, p.y - 14.5 * w, 3 * w).fill({ color: 0xf1cfa8 });
+            traffic.rect(p.x - 3 * w, p.y - 16.5 * w, 6 * w, 2 * w).fill({ color: shade(coat, 0.7) });
           }
         }
       };
-      stepMovers(0);
 
-      // Named places, for the "where am I" readout.
-      const namedPlaces: Array<{ name: string; x: number; y: number }> = [];
-      const noteName = (way: { name?: string; pts: number[] }) => {
-        if (!way.name) return;
-        let sx = 0;
-        let sy = 0;
-        const n = way.pts.length / 2;
-        for (let i = 0; i < way.pts.length; i += 2) { sx += way.pts[i]; sy += way.pts[i + 1]; }
-        namedPlaces.push({ name: way.name, x: sx / n, y: sy / n });
-      };
-      city.buildings.forEach(noteName);
-      city.parks.forEach(noteName);
-      city.water.forEach(noteName);
-
-      // ---- signage ---------------------------------------------------------
-      // Screen-space, so type stays the same size at any zoom.
-      const labelLayer = new Container();
-
-      /**
-       * Signs are described up front but only built when you come near them.
-       * A city has hundreds of names; making every text texture at load would
-       * stall for seconds and hold memory for signs you never walk past.
-       */
-      type SignSpec = {
-        wx: number;
-        wy: number;
-        text: string;
-        ink: number;
-        board: number;
-        lift: number;
-        leader: boolean;
-      };
-      const signSpecs: SignSpec[] = [];
-      const signNodes = new Map<number, any>();
-
-      /**
-       * Map type, not signage: dark ink with a soft light halo so it stays
-       * readable over grass, tarmac or a roof, the way a paper map reads.
-       */
-      const mapLabel = (text: string, street: boolean) => {
-        const label = new Text({
-          text,
-          style: {
-            fill: street ? 0x39434f : 0x4a4034,
-            fontSize: street ? 12 : 11,
-            fontFamily: "ui-sans-serif, system-ui, -apple-system, sans-serif",
-            fontWeight: street ? "600" : "500",
-            letterSpacing: street ? 0.4 : 0.2,
-            stroke: { color: 0xf7f6ee, width: 3.5, join: "round" },
-          },
-        });
-        label.anchor.set(0.5);
-        label.resolution = 2;
-        return label;
-      };
-
-
-
-      // street names, one per name per ~360m
-      const placedNames = new Map<string, Array<{ x: number; y: number }>>();
-      city.roads.forEach((way) => {
-        if (!way.name || way.pts.length < 4) return;
-        let best = { i: 0, len: 0 };
-        for (let i = 0; i < way.pts.length - 2; i += 2) {
-          const len = Math.hypot(way.pts[i + 2] - way.pts[i], way.pts[i + 3] - way.pts[i + 1]);
-          if (len > best.len) best = { i, len };
-        }
-        if (best.len < 22) return;
-
-        const mid = {
-          x: (way.pts[best.i] + way.pts[best.i + 2]) / 2,
-          y: (way.pts[best.i + 1] + way.pts[best.i + 3]) / 2,
+      // ---- streaming -------------------------------------------------------
+      // The first payload is already split by tile; everything beyond it is
+      // asked for as the player gets close, and dropped again once far away.
+      const clampCore = (i: number) => Math.max(-3, Math.min(2, i));
+      (() => {
+        const at = (x: number, y: number) => {
+          const cx = clampCore(tileIndex(x));
+          const cy = clampCore(tileIndex(y));
+          const k = tileKey(cx, cy);
+          let t = tileStore.get(k);
+          if (!t) { t = { cx, cy, roads: [], buildings: [], water: [], parks: [], trees: [] }; tileStore.set(k, t); }
+          return t;
         };
-        const placed = placedNames.get(way.name) ?? [];
-        if (placed.some((p) => Math.hypot(p.x - mid.x, p.y - mid.y) < 260)) return;
-        placed.push(mid);
-        placedNames.set(way.name, placed);
-
-        signSpecs.push({
-          wx: mid.x, wy: mid.y,
-          text: way.name.toUpperCase(),
-          ink: 0xf3e6d2, board: 0x39424c,
-          lift: 10, leader: false,
-        });
-      });
-
-      // landmarks worth steering by
-      const landmark = (pts: number[], name: string, board: number) => {
-        let sx = 0;
-        let sy = 0;
-        const n = pts.length / 2;
-        for (let i = 0; i < pts.length; i += 2) { sx += pts[i]; sy += pts[i + 1]; }
-        signSpecs.push({
-          wx: sx / n, wy: sy / n,
-          text: (name.length > 30 ? `${name.slice(0, 28)}…` : name).toUpperCase(),
-          ink: 0xfff3df, board,
-          lift: 40, leader: true,
-        });
-      };
-
-      const footprint = (pts: number[]) => {
-        let minX = Infinity;
-        let minY = Infinity;
-        let maxX = -Infinity;
-        let maxY = -Infinity;
-        for (let i = 0; i < pts.length; i += 2) {
-          minX = Math.min(minX, pts[i]);
-          maxX = Math.max(maxX, pts[i]);
-          minY = Math.min(minY, pts[i + 1]);
-          maxY = Math.max(maxY, pts[i + 1]);
+        city.roads.forEach((w) => at(w.pts[0], w.pts[1]).roads.push(w));
+        city.buildings.forEach((w) => at(w.pts[0], w.pts[1]).buildings.push(w));
+        city.water.forEach((w) => at(w.pts[0], w.pts[1]).water.push(w));
+        city.parks.forEach((w) => at(w.pts[0], w.pts[1]).parks.push(w));
+        city.trees.forEach((t) => at(t.x, t.y).trees.push(t));
+        // the core covers these tiles even where they turned out empty
+        for (let cx = -3; cx <= 2; cx++) {
+          for (let cy = -3; cy <= 2; cy++) at(cx * TILE_M + 1, cy * TILE_M + 1);
         }
-        return (maxX - minX) * (maxY - minY);
+      })();
+
+      const inFlight = new Set<string>();
+      const retryAt = new Map<string, number>();
+      const edgeDistance = (cx: number, cy: number, x: number, y: number) => {
+        const x0 = cx * TILE_M;
+        const y0 = cy * TILE_M;
+        const dx = Math.max(x0 - x, 0, x - (x0 + TILE_M));
+        const dy = Math.max(y0 - y, 0, y - (y0 + TILE_M));
+        return Math.hypot(dx, dy);
       };
 
-      city.water.forEach((w) => { if (w.name) landmark(w.pts, w.name, 0x2f5a7a); });
-      city.parks.forEach((w) => { if (w.name) landmark(w.pts, w.name, 0x3a5c30); });
-      // biggest named buildings only — a city has hundreds, a skyline has a few
-      city.buildings
-        .filter((w) => w.name)
-        .sort((a, b) => footprint(b.pts) - footprint(a.pts))
-        .slice(0, MAX_LANDMARK_SIGNS)
-        .forEach((w) => landmark(w.pts, w.name as string, 0x6b3f2a));
-
-      app.stage.addChild(labelLayer);
+      const stream = () => {
+        const { x, y } = playerRef.current;
+        for (const [key, tile] of loaded) {
+          if (edgeDistance(tile.cx, tile.cy, x, y) > UNLOAD_RANGE) removeTile(key);
+        }
+        const span = Math.ceil(LOAD_RANGE / TILE_M) + 1;
+        const c = tileIndex(x);
+        const d = tileIndex(y);
+        const want: Array<{ cx: number; cy: number; dist: number }> = [];
+        for (let cx = c - span; cx <= c + span; cx++) {
+          for (let cy = d - span; cy <= d + span; cy++) {
+            if (Math.abs(cx) > MAX_TILE_INDEX || Math.abs(cy) > MAX_TILE_INDEX) continue;
+            const dist = edgeDistance(cx, cy, x, y);
+            if (dist <= LOAD_RANGE) want.push({ cx, cy, dist });
+          }
+        }
+        want.sort((a, b) => a.dist - b.dist);
+        for (const w of want) {
+          const key = tileKey(w.cx, w.cy);
+          if (loaded.has(key) || inFlight.has(key)) continue;
+          const known = tileStore.get(key);
+          if (known) { addTile(known); continue; }
+          if ((retryAt.get(key) ?? 0) > Date.now()) continue;
+          const fetchTile = loadTileRef.current;
+          if (!fetchTile || inFlight.size >= MAX_IN_FLIGHT) break;
+          inFlight.add(key);
+          fetchTile(w.cx, w.cy)
+            .then((data) => {
+              if (!data) { retryAt.set(key, Date.now() + 20_000); return; }
+              tileStore.set(key, data);
+              if (mounted && edgeDistance(w.cx, w.cy, playerRef.current.x, playerRef.current.y) <= UNLOAD_RANGE) addTile(data);
+            })
+            .catch(() => retryAt.set(key, Date.now() + 20_000))
+            .finally(() => inFlight.delete(key));
+        }
+      };
 
       // ---- witnesses -------------------------------------------------------
       const castLayer = new Container();
@@ -872,6 +1164,7 @@ export default function CityScene({
           node.addChild(tag);
 
           node.alpha = w.locked ? 0.6 : 1;
+          node.scale.set(0.7);
           node.x = p.x;
           node.y = p.y;
           node.zIndex = p.y;
@@ -912,12 +1205,26 @@ export default function CityScene({
           // exactly where you are standing, so a short post is invisible.
           node.addChild(new Graphics().rect(-1.5, -48, 3, 48).fill({ color: 0x8a6476 }));
 
-          const heart = new Graphics()
-            .circle(-4.4, -56, 5).fill({ color: 0xe98bb4 })
-            .circle(4.4, -56, 5).fill({ color: 0xe98bb4 })
-            .poly([-9, -54.5, 9, -54.5, 0, -42]).fill({ color: 0xe98bb4 })
-            .circle(-5.6, -57.8, 1.7).fill({ color: 0xffd4e6 });
-          heart.stroke({ width: 1.5, color: 0x7d3f5c, alpha: 0.6 });
+          const heart = new Graphics();
+          if (m.photo) {
+            // a polaroid on the post: white card, a pale picture, a small heart
+            heart
+              .roundRect(-13, -72, 26, 31, 1.5).fill({ color: 0xfffdf8 })
+              .rect(-11, -70, 22, 20).fill({ color: 0xb9c8d6 })
+              .rect(-11, -62, 22, 12).fill({ color: 0x8fb08a })
+              .circle(-2.6, -46.5, 2.4).fill({ color: 0xe98bb4 })
+              .circle(2.6, -46.5, 2.4).fill({ color: 0xe98bb4 })
+              .poly([-5, -45.8, 5, -45.8, 0, -41.5]).fill({ color: 0xe98bb4 });
+            heart.stroke({ width: 1, color: 0x8a6476, alpha: 0.5 });
+            heart.rotation = -0.06;
+          } else {
+            heart
+              .circle(-4.4, -56, 5).fill({ color: 0xe98bb4 })
+              .circle(4.4, -56, 5).fill({ color: 0xe98bb4 })
+              .poly([-9, -54.5, 9, -54.5, 0, -42]).fill({ color: 0xe98bb4 })
+              .circle(-5.6, -57.8, 1.7).fill({ color: 0xffd4e6 });
+            heart.stroke({ width: 1.5, color: 0x7d3f5c, alpha: 0.6 });
+          }
           node.addChild(heart);
 
           node.x = p.x;
@@ -983,6 +1290,7 @@ export default function CityScene({
           node.addChild(tag);
 
           node.alpha = 0.9;
+          node.scale.set(0.7);
           node.x = at.x;
           node.y = at.y;
           node.zIndex = at.y;
@@ -1058,83 +1366,12 @@ export default function CityScene({
         }
       };
 
-      // ---- collision -------------------------------------------------------
-      const cellKey = (x: number, y: number) =>
-        `${Math.floor(x / COLLIDE_CELL)},${Math.floor(y / COLLIDE_CELL)}`;
-      const solids = new Map<string, number[][]>();
-
-      city.buildings.forEach((way) => {
-        let minX = Infinity;
-        let minY = Infinity;
-        let maxX = -Infinity;
-        let maxY = -Infinity;
-        for (let i = 0; i < way.pts.length; i += 2) {
-          minX = Math.min(minX, way.pts[i]);
-          maxX = Math.max(maxX, way.pts[i]);
-          minY = Math.min(minY, way.pts[i + 1]);
-          maxY = Math.max(maxY, way.pts[i + 1]);
-        }
-        for (let cx = Math.floor(minX / COLLIDE_CELL); cx <= Math.floor(maxX / COLLIDE_CELL); cx++) {
-          for (let cy = Math.floor(minY / COLLIDE_CELL); cy <= Math.floor(maxY / COLLIDE_CELL); cy++) {
-            const key = `${cx},${cy}`;
-            const bucket = solids.get(key) ?? [];
-            bucket.push(way.pts);
-            solids.set(key, bucket);
-          }
-        }
-      });
-
+      // ---- footing ---------------------------------------------------------
       const blocked = (x: number, y: number) => {
-        const bucket = solids.get(cellKey(x, y));
-        if (!bucket) return false;
-        return bucket.some((pts) => insidePoly(pts, x, y));
+        const list = solids.get(cellKey(x, y));
+        if (!list) return false;
+        return list.some((entry) => insidePoly(entry.pts, x, y));
       };
-
-      // ---- where you may actually stand -------------------------------------
-      // Roads, footways and pedestrian areas, plus the inside of any park.
-      // Everything else is somebody's building or somebody's back yard.
-      type Seg = { x1: number; y1: number; x2: number; y2: number; r: number };
-      const walkHash = new Map<string, Seg[]>();
-
-      const addSeg = (seg: Seg) => {
-        const minX = Math.min(seg.x1, seg.x2) - seg.r;
-        const maxX = Math.max(seg.x1, seg.x2) + seg.r;
-        const minY = Math.min(seg.y1, seg.y2) - seg.r;
-        const maxY = Math.max(seg.y1, seg.y2) + seg.r;
-        for (let cx = Math.floor(minX / WALK_CELL); cx <= Math.floor(maxX / WALK_CELL); cx++) {
-          for (let cy = Math.floor(minY / WALK_CELL); cy <= Math.floor(maxY / WALK_CELL); cy++) {
-            const key = `${cx},${cy}`;
-            const bucket = walkHash.get(key) ?? [];
-            bucket.push(seg);
-            walkHash.set(key, bucket);
-          }
-        }
-      };
-
-      city.roads.forEach((way) => {
-        const r = WALK_WIDTH[way.kind] ?? DEFAULT_WALK_WIDTH;
-        for (let i = 0; i < way.pts.length - 2; i += 2) {
-          addSeg({ x1: way.pts[i], y1: way.pts[i + 1], x2: way.pts[i + 2], y2: way.pts[i + 3], r });
-        }
-      });
-
-      const parkHash = new Map<string, number[][]>();
-      const addArea = (pts: number[]) => {
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-        for (let i = 0; i < pts.length; i += 2) {
-          minX = Math.min(minX, pts[i]); maxX = Math.max(maxX, pts[i]);
-          minY = Math.min(minY, pts[i + 1]); maxY = Math.max(maxY, pts[i + 1]);
-        }
-        for (let cx = Math.floor(minX / WALK_CELL); cx <= Math.floor(maxX / WALK_CELL); cx++) {
-          for (let cy = Math.floor(minY / WALK_CELL); cy <= Math.floor(maxY / WALK_CELL); cy++) {
-            const key = `${cx},${cy}`;
-            const bucket = parkHash.get(key) ?? [];
-            bucket.push(pts);
-            parkHash.set(key, bucket);
-          }
-        }
-      };
-      city.parks.forEach((park) => addArea(park.pts));
 
       const onPavedGround = (x: number, y: number) => {
         const key = `${Math.floor(x / WALK_CELL)},${Math.floor(y / WALK_CELL)}`;
@@ -1150,7 +1387,7 @@ export default function CityScene({
         }
         const areas = parkHash.get(key);
         if (areas) {
-          for (const pts of areas) if (insidePoly(pts, x, y)) return true;
+          for (const entry of areas) if (insidePoly(entry.pts, x, y)) return true;
         }
         return false;
       };
@@ -1162,23 +1399,26 @@ export default function CityScene({
        * then you fight the clamp forever.
        */
       const walkable = (x: number, y: number) =>
-        Math.hypot(x, y) <= city.radius && onPavedGround(x, y) && !blocked(x, y);
+        Math.hypot(x, y) <= WORLD_LIMIT_M && onPavedGround(x, y) && !blocked(x, y);
 
       /**
-       * Nearest piece of open ground. `minAway` lets a trapped player ask for
-       * somewhere that is not simply where they are already standing.
+       * Nearest piece of open ground among the tiles drawn so far. `minAway`
+       * lets a trapped player ask for somewhere that is not simply where they
+       * are already standing.
        */
       const snapToGround = (x: number, y: number, minAway = 0) => {
         if (minAway === 0 && walkable(x, y)) return { x, y };
         let best = { x, y };
         let bestDist = Infinity;
-        for (const road of city.roads) {
-          for (let i = 0; i < road.pts.length; i += 2) {
-            const d = Math.hypot(road.pts[i] - x, road.pts[i + 1] - y);
-            if (d < minAway || d >= bestDist) continue;
-            if (walkable(road.pts[i], road.pts[i + 1])) {
-              bestDist = d;
-              best = { x: road.pts[i], y: road.pts[i + 1] };
+        for (const roads of roadsByTile.values()) {
+          for (const road of roads) {
+            for (let i = 0; i < road.pts.length; i += 2) {
+              const d = Math.hypot(road.pts[i] - x, road.pts[i + 1] - y);
+              if (d < minAway || d >= bestDist) continue;
+              if (walkable(road.pts[i], road.pts[i + 1])) {
+                bestDist = d;
+                best = { x: road.pts[i], y: road.pts[i + 1] };
+              }
             }
           }
         }
@@ -1314,7 +1554,8 @@ export default function CityScene({
       // lives in `rig`, which is mirrored to face the way you are going.
       const player = new Container();
       const playerRing = new Graphics()
-        .ellipse(0, 2, 15, 7).stroke({ width: 2.5, color: 0xffffff, alpha: 0.9 });
+        .ellipse(0, 2, 19, 9).stroke({ width: 3, color: 0xd4708f, alpha: 0.9 })
+        .ellipse(0, 2, 13, 6).stroke({ width: 2, color: 0xffffff, alpha: 0.9 });
       const playerShadow = new Graphics().ellipse(2, 2, 10, 4.5).fill({ color: SHADOW, alpha: 0.35 });
       player.addChild(playerRing, playerShadow);
 
@@ -1381,6 +1622,7 @@ export default function CityScene({
 
       world.scale.set(DEFAULT_ZOOM);
 
+      stream();
       const footing = snapToGround(pose.current.x, pose.current.y);
       pose.current.x = footing.x;
       pose.current.y = footing.y;
@@ -1421,7 +1663,7 @@ export default function CityScene({
 
         signSpecs.forEach((spec, index) => {
           const d = Math.hypot(spec.wx - x, spec.wy - y);
-          if (d > SIGN_KEEP_RANGE) {
+          if (d > SIGN_KEEP_RANGE || (spec.minor && d > MINOR_SIGN_RANGE)) {
             const node = signNodes.get(index);
             if (node) {
               labelLayer.removeChild(node);
@@ -1489,7 +1731,7 @@ export default function CityScene({
         const p = iso(playerRef.current.x, playerRef.current.y);
         player.x = p.x;
         player.y = p.y;
-        player.scale.set(Math.min(2.6, 0.8 / world.scale.x));
+        player.scale.set(Math.min(2.6, 0.85 / world.scale.x));
         if (snap) {
           cam.x = p.x;
           cam.y = p.y;
@@ -1506,14 +1748,13 @@ export default function CityScene({
        * ghost. This is what makes a top-down-ish view feel like being *in* the
        * street rather than looking down on a model of one.
        */
-      const fadedNow: Block[] = [];
       const updateOcclusion = () => {
         const { x, y } = playerRef.current;
         const here = iso(x, y);
         const depth = x + y;
 
         for (const block of fadedNow) {
-          block.gfx.alpha = 1;
+          block.gfx.alpha = block.haze;
           block.faded = false;
         }
         fadedNow.length = 0;
@@ -1589,14 +1830,18 @@ export default function CityScene({
         const k = e.key.toLowerCase();
         if (MOVE.includes(k)) keys[k] = false;
       };
-      const wheel = (e: WheelEvent) => {
-        e.preventDefault();
-        const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, world.scale.x * (e.deltaY > 0 ? 0.88 : 1.12)));
+      const zoomBy = (factor: number) => {
+        const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, world.scale.x * factor));
         world.scale.set(next);
         place(true);
-      updateSigns();
-      positionSigns();
+        updateSigns();
+        positionSigns();
       };
+      const wheel = (e: WheelEvent) => {
+        e.preventDefault();
+        zoomBy(e.deltaY > 0 ? 0.88 : 1.12);
+      };
+      if (apiRef.current) apiRef.current.current = { zoomBy };
       window.addEventListener("keydown", kd);
       window.addEventListener("keyup", ku);
       host.addEventListener("wheel", wheel, { passive: false });
@@ -1618,9 +1863,16 @@ export default function CityScene({
        */
       let sinceStep = 0;
 
+      let sinceStream = 0;
+      let sinceDusk = 0;
       app.ticker.add((ticker: any) => {
         const dt = Math.min(0.06, ticker.deltaMS / 1000);
         clock += dt * 2;
+        sinceStream += ticker.deltaMS;
+        if (sinceStream > 500) { sinceStream = 0; stream(); }
+        sinceDusk += ticker.deltaMS;
+        if (sinceDusk > 60_000) { sinceDusk = 0; paintDusk(); }
+        updateFocus(dt);
         stepMovers(dt);
         if (sxNow === 0 && syNow === 0) animate(dt, 0);
 
@@ -1630,6 +1882,11 @@ export default function CityScene({
         if (keys["d"] || keys["arrowright"]) sx += 1;
         if (keys["w"] || keys["arrowup"]) sy -= 1;
         if (keys["s"] || keys["arrowdown"]) sy += 1;
+        const stick = touchRef.current?.current;
+        if (stick && (stick.sx !== 0 || stick.sy !== 0)) {
+          sx += stick.sx;
+          sy += stick.sy;
+        }
         sxNow = sx;
         syNow = sy;
 
@@ -1640,7 +1897,8 @@ export default function CityScene({
           mx /= len;
           my /= len;
 
-          const step = RUN_SPEED * kitRef.current.speed * (keys["shift"] ? SPRINT_MULT : 1) * dt;
+          const running = !!keys["shift"] || !!stick?.run;
+          const step = RUN_SPEED * kitRef.current.speed * (running ? SPRINT_MULT : 1) * dt;
           const here = playerRef.current;
 
           // Free roam: streets, grass, rooftops, all of it. The only limit is
@@ -1649,14 +1907,13 @@ export default function CityScene({
           here.y += my * step;
 
           const out = Math.hypot(here.x, here.y);
-          if (out > city.radius) {
-            here.x *= city.radius / out;
-            here.y *= city.radius / out;
+          if (out > WORLD_LIMIT_M) {
+            here.x *= WORLD_LIMIT_M / out;
+            here.y *= WORLD_LIMIT_M / out;
           }
 
           // A step every few metres, so the pace follows the legs rather than
           // the frame rate — and shortens when running.
-          const running = !!keys["shift"];
           sinceStep += dt;
           if (sinceStep >= (running ? 0.19 : 0.29)) {
             sinceStep = 0;
@@ -1702,6 +1959,8 @@ export default function CityScene({
         // every frame or they slide out of place while the map moves under them.
         updateSigns(dt);
         positionSigns();
+        // Only what is on screen gets drawn; a dense city has far more loaded.
+        Culler.shared.cull(world, app.screen, false);
 
         // Witnesses pace their own corner rather than standing like statues.
         // The leash keeps them near the street the case file names.
@@ -1813,19 +2072,23 @@ export default function CityScene({
           const { x, y } = playerRef.current;
           let best: string | null = null;
           let bestDist = 30;
-          for (const s of segments) {
-            const dx = s.x2 - s.x1;
-            const dy = s.y2 - s.y1;
-            const lenSq = dx * dx + dy * dy || 1;
-            const t = Math.max(0, Math.min(1, ((x - s.x1) * dx + (y - s.y1) * dy) / lenSq));
-            const d = Math.hypot(x - (s.x1 + t * dx), y - (s.y1 + t * dy));
-            if (d < bestDist) { bestDist = d; best = s.name; }
+          for (const segments of segmentsByTile.values()) {
+            for (const s of segments) {
+              const dx = s.x2 - s.x1;
+              const dy = s.y2 - s.y1;
+              const lenSq = dx * dx + dy * dy || 1;
+              const t = Math.max(0, Math.min(1, ((x - s.x1) * dx + (y - s.y1) * dy) / lenSq));
+              const d = Math.hypot(x - (s.x1 + t * dx), y - (s.y1 + t * dy));
+              if (d < bestDist) { bestDist = d; best = s.name; }
+            }
           }
           let place: string | null = null;
           let placeDist = 95;
-          for (const named of namedPlaces) {
-            const d = Math.hypot(named.x - x, named.y - y);
-            if (d < placeDist) { placeDist = d; place = named.name; }
+          for (const places of placesByTile.values()) {
+            for (const named of places) {
+              const d = Math.hypot(named.x - x, named.y - y);
+              if (d < placeDist) { placeDist = d; place = named.name; }
+            }
           }
 
           if (best !== lastStreet || place !== lastPlace) {
@@ -1840,6 +2103,7 @@ export default function CityScene({
         if (!hostRef.current) return;
         app.renderer.resize(hostRef.current.clientWidth, hostRef.current.clientHeight);
         layoutOverlays();
+        paintDusk();
         place(true);
       updateSigns();
       positionSigns();
@@ -1847,6 +2111,7 @@ export default function CityScene({
       ro.observe(host);
 
       teardown = () => {
+        if (apiRef.current) apiRef.current.current = null;
         window.removeEventListener("keydown", kd);
         window.removeEventListener("keyup", ku);
         host.removeEventListener("wheel", wheel);
