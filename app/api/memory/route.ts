@@ -103,7 +103,8 @@ export async function POST(request: Request) {
     cleaned?: string;
   }>({
     tier: "cheap",
-    timeoutMs: 15_000,
+    timeoutMs: 8_000,
+    budgetMs: 12_000,
     prompt:
 `You are checking a short memory that someone wants to pin to a public place in ${body.city ?? "a city"}${body.place ? `, near ${body.place}` : ""}. Other people will find it there.
 

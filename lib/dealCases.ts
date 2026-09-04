@@ -49,5 +49,20 @@ export const dealCases = (pool: Site[], count: number): Site[] => {
     .filter((s) => seen[s.id])
     .sort((a, b) => (seen[a.id] ?? 0) - (seen[b.id] ?? 0));
 
-  return [...fresh, ...stale].slice(0, count);
+  return spread([...fresh, ...stale], count);
+};
+
+/** Cases dealt together should not share a square: solving one must not solve the next. */
+const MIN_APART_M = 260;
+
+const spread = (ordered: Site[], count: number): Site[] => {
+  for (const apart of [MIN_APART_M, 160, 80, 0]) {
+    const chosen: Site[] = [];
+    for (const site of ordered) {
+      if (chosen.length >= count) break;
+      if (!chosen.some((c) => Math.hypot(c.x - site.x, c.y - site.y) < apart)) chosen.push(site);
+    }
+    if (chosen.length >= count) return chosen;
+  }
+  return ordered.slice(0, count);
 };

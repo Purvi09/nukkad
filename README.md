@@ -41,7 +41,7 @@ npm install
 npm run dev
 ```
 
-`.env.local` needs:
+`.env` (or `.env.local`) needs:
 
 ```
 GEMINI_API_KEY=…                        # Google AI Studio
@@ -50,14 +50,25 @@ NEXT_PUBLIC_FIREBASE_API_KEY=…          # and the rest of the Firebase config
 ```
 
 Everything degrades rather than breaking. Without Gemini the clues fall back to
-redacted source text; without Firebase, memories live in browser storage.
+redacted source text; without Firebase, memories live in browser storage;
+without a Maps key, cities are geocoded with Nominatim instead of Google, and
+a town Wikipedia has not written up is still walkable, just with no cases to
+play.
+
+A city starts as the 2.4 km square around its centre and streams outward in
+400 m tiles as you walk, out to about 2.7 km from the centre. Tiles are capped
+per tile rather than per city, so a dense city is dense everywhere. Overpass
+rations queries per address, so the server asks for tiles two-by-two, one
+request at a time, and warms the ring around a fresh city slowly in the
+background. Cases and witnesses stay inside the initial square. For a big city,
+name the part you mean: "Indiranagar, Bangalore".
 
 ## How it is put together
 
 | | |
 |---|---|
 | Rendering | Pixi.js, isometric, one canvas |
-| Map data | OpenStreetMap via Overpass, geocoded with Nominatim |
+| Map data | OpenStreetMap via Overpass, geocoded with Google (Nominatim as fallback) |
 | History | Wikipedia geosearch, filtered so a district can never be an answer |
 | Writing | Gemini, rotated across seven models to survive the free tier |
 | Storage | Firestore and Firebase Storage, anonymous auth |

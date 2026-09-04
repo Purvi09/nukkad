@@ -107,6 +107,53 @@ const redactTitle = (text: string, site: Site) => {
   return out.replace(/(▁▁▁▁[\s,]*){2,}/g, "▁▁▁▁ ").replace(/\s+/g, " ").trim();
 };
 
+const PLACEHOLDER = /▁▁▁▁/g;
+
+/**
+ * The opening fact: what happened, told in the sentences that still make sense
+ * once the name is taken out. "The Queen ▁▁ II ▁▁ is a ▁▁ in Lisbon" is not a
+ * clue, it is a form with the answers missing.
+ */
+const openingFact = (site: Site) => {
+  const sentences = site.summary
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(/(?<=[.!?])\s+/)
+    .slice(0, 5);
+
+  const scored = sentences
+    .map((sentence, index) => {
+      const hidden = redactTitle(sentence, site);
+      const holes = (hidden.match(PLACEHOLDER) ?? []).length;
+      const words = sentence.split(/\s+/).length;
+      let score = words > 6 ? 1 : -2;
+      if (/\b(1[0-9]{3}|20[0-2][0-9])\b/.test(sentence)) score += 2;
+      score -= holes * 2;
+      if (holes / Math.max(1, words) > 0.2) score -= 6; // more hole than sentence
+      return { index, score, hidden };
+    })
+    .filter((s) => s.score > -4)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 2)
+    .sort((a, b) => a.index - b.index);
+
+  let seen = false;
+  const text = scored
+    .map((s) => s.hidden)
+    .join(" ")
+    .replace(PLACEHOLDER, () => { if (seen) return "it"; seen = true; return "the place"; })
+    // "the historic the place" -> "the historic place"
+    .replace(/\b(the|a|an)\s+((?:\w+\s+)?)the place\b/gi, "the $2place")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (text.length > 30) return text.slice(0, 220);
+  return site.era === "undated"
+    ? "Something happened at the place worth remembering. Ask around."
+    : `Something happened at the place around ${site.era}. Ask around.`;
+};
+
 /** The nearest named thing to a point, for describing where something is. */
 const nearestNamed = (
   ways: Way[],
@@ -245,9 +292,8 @@ export const placeWitnesses = (city: CityData, site: Site, count = 4): WitnessSp
 
   // Build the strongest chain this city's data can support.
   // The opening fact must say what happened without ever naming it.
-  const opening = site.summary.split(/(?<=[.!?])\s+/).slice(0, 2).join(" ");
   const facts: WitnessFact[] = [
-    { kind: "context", era: site.era, detail: redactTitle(opening, site).slice(0, 200) },
+    { kind: "context", era: site.era, detail: openingFact(site) },
     { kind: "quadrant", bearing: fromCentre, band: centreBand },
   ];
   if (nearStreet || nearPark || nearWater) {

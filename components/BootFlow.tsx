@@ -12,15 +12,25 @@ type Props = {
   onLook: (l: Look) => void;
   name: string;
   onName: (n: string) => void;
-  status: string;
+  /** Which step of the build is running: 0 idle, 1 city, 2 history, 3 memories. */
+  stage: number;
   error: string | null;
   building: boolean;
   cityLabel: string | null;
   onBuild: (city: string) => void;
   onBegin: () => void;
+  /** Someone sent a link to a memory: where it is, and the city to build. */
+  arrival?: { place: string; city: string; query: string; by: string } | null;
 };
 
 const SUGGESTED = ["San Francisco", "Lisbon", "Kyoto", "Edinburgh", "Old Delhi", "Havana"];
+
+/** What building a city involves, in the order it happens. */
+const BUILD_STEPS = [
+  "Finding it and fetching its streets",
+  "Reading what happened here",
+  "Asking who else has been here",
+];
 
 const STEPS: Array<{ id: Step; label: string }> = [
   { id: "recruit", label: "You" },
@@ -29,7 +39,7 @@ const STEPS: Array<{ id: Step; label: string }> = [
 ];
 
 export default function BootFlow({
-  look, onLook, name, onName, status, error, building, cityLabel, onBuild, onBegin,
+  look, onLook, name, onName, stage, error, building, cityLabel, onBuild, onBegin, arrival,
 }: Props) {
   const [step, setStep] = useState<Step>("title");
   const [query, setQuery] = useState("");
@@ -43,6 +53,16 @@ export default function BootFlow({
   useEffect(() => {
     if (step === "jurisdiction") inputRef.current?.focus();
   }, [step]);
+
+  // A link already says which city: build it the moment the name is in.
+  const autoBuild = useRef(false);
+  useEffect(() => {
+    if (step === "jurisdiction" && arrival && !autoBuild.current && !building && !cityLabel) {
+      autoBuild.current = true;
+      setQuery(arrival.city);
+      onBuild(arrival.query);
+    }
+  }, [step, arrival, building, cityLabel, onBuild]);
 
   const progress = (
     <div className="boot-steps">
@@ -68,14 +88,21 @@ export default function BootFlow({
             <span>Every place</span>
             <span>remembers <em>something</em>.</span>
           </h1>
-          <p className="boot-lede">
-            Walk a real city, drawn street for street from open map data. Find the memories
-            people have left at the places they happened — a corner, a bench, a doorway — and
-            leave your own. When you want more, the city has its own history to find.
-          </p>
+          {arrival ? (
+            <p className="boot-lede boot-lede--arrival">
+              <strong>{arrival.by}</strong> left a memory for you at <strong>{arrival.place}</strong>,
+              in {arrival.city}. Give a name, and you will be standing there.
+            </p>
+          ) : (
+            <p className="boot-lede">
+              Walk the street you grew up on, drawn from open map data. Find the memories
+              people have left at the places they happened — a corner, a bench, a doorway — and
+              leave your own. When you want more, the city has its own history to find.
+            </p>
+          )}
           <div className="boot-actions">
             <button className="hud-button hud-button--primary" onClick={() => setStep("recruit")}>
-              Start exploring
+              {arrival ? "Go there" : "Start exploring"}
             </button>
           </div>
           <p className="boot-foot">
@@ -144,10 +171,12 @@ export default function BootFlow({
         <div className="boot-inner">
           {progress}
           <div className="panel">
-            <p className="panel-title">Which city</p>
+            <p className="panel-title">Where did you grow up?</p>
             <p className="panel-note" style={{ marginBottom: 16 }}>
-              Anywhere on earth. Its streets, buildings, parks and trees come from OpenStreetMap,
-              its history from the record, and its memories from whoever has walked it before you.
+              A street, a neighbourhood, or a whole city, anywhere on earth. You start standing
+              right there, and the streets keep loading as you walk. The map comes from
+              OpenStreetMap, the history from the record, and the memories from whoever has
+              walked it before you.
             </p>
             <form
               className="jurisdiction"
@@ -157,7 +186,7 @@ export default function BootFlow({
                 ref={inputRef}
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="Delhi, Lisbon, Kyoto…"
+                placeholder="Indiranagar, Bangalore · Rua Augusta, Lisbon · Kyoto…"
                 disabled={building}
               />
               <button className="hud-button hud-button--primary" type="submit" disabled={building}>
@@ -177,8 +206,31 @@ export default function BootFlow({
               ))}
             </div>
 
-            {building && <p className="boot-status">▸ {status}</p>}
-            {error && <p className="boot-error">✕ {error}</p>}
+            {building && (
+              <ol className="build-steps" aria-live="polite">
+                {BUILD_STEPS.map((label, index) => {
+                  const n = index + 1;
+                  const cls = n < stage ? "build-step build-step--done"
+                    : n === stage ? "build-step build-step--on"
+                    : "build-step";
+                  return (
+                    <li key={label} className={cls}>
+                      <span className="build-mark">{n < stage ? "✓" : n === stage ? "" : "·"}</span>
+                      {label}
+                    </li>
+                  );
+                })}
+                <li className="build-note">A big city takes twenty or thirty seconds the first time.</li>
+              </ol>
+            )}
+            {error && (
+              <p className="boot-error">
+                ✕ {error}
+                {/streets|street data/i.test(error) && (
+                  <> Try the nearest larger town, or a named neighbourhood.</>
+                )}
+              </p>
+            )}
           </div>
           <div className="boot-actions">
             <button
@@ -200,6 +252,11 @@ export default function BootFlow({
         {progress}
         <div className="panel">
           <p className="panel-title">{cityLabel}</p>
+          {arrival && (
+            <p className="panel-note" style={{ marginBottom: 12, color: "var(--accent)" }}>
+              {arrival.by}&rsquo;s memory is waiting at {arrival.place}. You will arrive beside it.
+            </p>
+          )}
           <p className="panel-note" style={{ marginBottom: 18 }}>
             Walk it however you like. Pink hearts are memories people have left at real places —
             walk up to one and read it. Leave your own wherever something happened to you.

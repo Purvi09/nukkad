@@ -48,6 +48,22 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    /**
+     * A built city, gzipped, so the second person to ask for it never waits
+     * on Overpass. Same trade as the cases above: a client writes it, the app
+     * checks the version stamp on read, and the size is capped.
+     */
+    match /cities/{cityKey} {
+      allow read: if true;
+      allow create, update: if request.auth != null
+        && request.resource.data.version is string
+        && request.resource.data.at is number
+        && request.resource.data.label is string
+        && request.resource.data.bytes is bytes
+        && request.resource.data.bytes.size() <= 900000;
+      allow delete: if false;
+    }
+
     match /casts/{siteId} {
       allow read: if true;
       allow create, update: if request.auth != null

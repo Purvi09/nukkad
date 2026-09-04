@@ -610,7 +610,7 @@ h1, h2, h3, .explore-title, .boot-title, .hud-who { font-family: var(--display);
 .casefile {
   position: absolute;
   z-index: 6;
-  top: 112px;
+  top: 136px;
   left: 20px;
   width: 0;
   padding: 0;
@@ -678,7 +678,9 @@ h1, h2, h3, .explore-title, .boot-title, .hud-who { font-family: var(--display);
   width: min(330px, 32vw);
   padding: 0;
   border: 1px solid var(--line);
-  background: linear-gradient(180deg, rgba(16, 34, 54, 0.94), rgba(11, 24, 40, 0.96));
+  background: var(--panel);
+  border-radius: 16px;
+  box-shadow: 0 14px 40px rgba(90, 62, 44, 0.16);
 }
 
 .fieldlog::before,
@@ -923,7 +925,7 @@ h1, h2, h3, .explore-title, .boot-title, .hud-who { font-family: var(--display);
 .nudge--warn {
   border-left-color: var(--danger);
   background: rgba(224, 104, 95, 0.1);
-  color: #f0b0aa;
+  color: var(--danger);
 }
 
 .breakdown {
@@ -1229,7 +1231,7 @@ h1, h2, h3, .explore-title, .boot-title, .hud-who { font-family: var(--display);
 
 .talk-prompt--cold {
   border-color: var(--danger);
-  color: #f0b0aa;
+  color: var(--danger);
   max-width: min(520px, 80vw);
   white-space: normal;
   text-align: center;
@@ -1256,9 +1258,11 @@ h1, h2, h3, .explore-title, .boot-title, .hud-who { font-family: var(--display);
 .streetphoto figcaption {
   padding: 7px 10px;
   border-top: 1px solid var(--line);
-  color: var(--muted);
+  background: var(--panel-soft);
+  color: var(--ink);
+  opacity: 0.75;
   font-family: var(--mono);
-  font-size: 9.5px;
+  font-size: 10px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
@@ -1353,7 +1357,7 @@ h1, h2, h3, .explore-title, .boot-title, .hud-who { font-family: var(--display);
   padding: 9px 12px;
   border-left: 2px solid var(--danger);
   background: rgba(224, 104, 95, 0.1);
-  color: #f0b0aa;
+  color: var(--danger);
   font-size: 13px;
   line-height: 1.5;
 }
@@ -1456,8 +1460,8 @@ h1, h2, h3, .explore-title, .boot-title, .hud-who { font-family: var(--display);
   right: 8px;
   padding: 5px 10px;
   border: 1px solid rgba(255, 255, 255, 0.5);
-  background: rgba(9, 20, 33, 0.85);
-  color: var(--ink);
+  background: rgba(58, 46, 40, 0.82);
+  color: #fff;
   font-family: var(--mono);
   font-size: 10px;
   letter-spacing: 0.08em;
@@ -2042,3 +2046,571 @@ h1, h2, h3, .explore-title, .boot-title, .hud-who { font-family: var(--display);
 }
 
 .room-mic { font-size: 11px; margin-left: 2px; }
+
+/* ---- building a city: the steps, as they happen ------------------------- */
+
+.build-steps {
+  list-style: none;
+  margin: 18px 0 0;
+  padding: 14px 16px 12px;
+  border-radius: 12px;
+  background: var(--panel-soft);
+}
+
+.build-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+  color: var(--muted);
+  font-size: 13px;
+  transition: color 0.2s;
+}
+
+.build-step--on { color: var(--ink); font-weight: 600; }
+.build-step--done { color: var(--green); }
+
+.build-mark {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  font-size: 11px;
+  font-family: var(--mono);
+}
+
+.build-step--done .build-mark { background: rgba(106, 168, 127, 0.18); }
+
+@keyframes build-spin { to { transform: rotate(360deg); } }
+
+.build-step--on .build-mark {
+  border: 2px solid var(--accent);
+  border-right-color: transparent;
+  animation: build-spin 0.9s linear infinite;
+}
+
+.build-note {
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11.5px;
+  font-style: italic;
+}
+
+/* ---- the scene drawing itself --------------------------------------------- */
+
+.drawing {
+  position: absolute;
+  z-index: 20;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 22px;
+  border-radius: 16px;
+  max-width: min(420px, calc(100% - 40px));
+}
+
+.drawing-spinner {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  border-right-color: transparent;
+  animation: build-spin 0.9s linear infinite;
+}
+
+.drawing-text {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 16px;
+  font-variation-settings: "SOFT" 60, "WONK" 1;
+}
+
+/* ---- small affordances --------------------------------------------------- */
+
+.hud-leave {
+  display: block;
+  margin: 4px 0 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.hud-leave:hover { color: var(--accent); }
+
+.keys-action {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+.keys-action:hover { text-decoration: underline; }
+
+button.talk-prompt {
+  pointer-events: auto;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+button.talk-prompt:hover { background: var(--accent); color: #fff; }
+button.talk-prompt:hover kbd { color: var(--accent); }
+
+.action-panel kbd {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.28);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+/* ---- touch: a stick and some big buttons --------------------------------- */
+
+.touch {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  pointer-events: none;
+}
+
+.stick {
+  position: absolute;
+  left: 22px;
+  bottom: 22px;
+  width: 132px;
+  height: 132px;
+  border-radius: 50%;
+  background: rgba(255, 253, 249, 0.55);
+  border: 1px solid var(--line);
+  box-shadow: 0 8px 22px rgba(90, 62, 44, 0.14);
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  backdrop-filter: blur(6px);
+}
+
+.stick--active { background: rgba(255, 253, 249, 0.75); }
+
+.stick-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 54px;
+  height: 54px;
+  margin: -27px 0 0 -27px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 6px 16px rgba(212, 112, 143, 0.4);
+  will-change: transform;
+}
+
+.stick-hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 10px;
+  text-align: center;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.stick--active .stick-hint { opacity: 0; }
+
+.touch-actions {
+  position: absolute;
+  right: 18px;
+  bottom: 22px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  pointer-events: auto;
+}
+
+.touch-button {
+  min-width: 64px;
+  min-height: 48px;
+  padding: 0 18px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  box-shadow: 0 8px 22px rgba(90, 62, 44, 0.18);
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.touch-button:active { transform: scale(0.96); }
+
+.touch-button--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.touch-button--hot {
+  border-color: var(--accent);
+  color: var(--accent);
+  animation: nearest-pulse 1.4s ease-in-out infinite;
+}
+
+.touch-zoom {
+  position: absolute;
+  right: 18px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+.touch-zoom .touch-button {
+  min-width: 44px;
+  width: 44px;
+  min-height: 44px;
+  padding: 0;
+  font-size: 20px;
+  line-height: 1;
+}
+
+/* the keyboard strip means nothing to a thumb */
+@media (pointer: coarse) {
+  .hud-keys { display: none; }
+  /* the stick lives bottom-left, so the street name moves up under the title */
+  .you-are-here {
+    left: 12px;
+    bottom: auto;
+    top: 84px;
+    max-width: min(240px, 60vw);
+  }
+  .casefile--open { max-height: calc(100vh - 300px); }
+}
+
+/* ---- narrow screens ------------------------------------------------------ */
+
+@media (max-width: 720px) {
+  .hud-tl { top: 12px; left: 12px; padding: 8px 12px; }
+  .hud-city { font-size: 10px; }
+  .hud-who { font-size: 16px; }
+
+  .hud-tr { top: 12px; right: 58px; gap: 12px; padding: 8px 12px; }
+  .hud-stat strong { font-size: 14px; }
+  .sound-toggle { top: 12px; right: 12px; width: 34px; height: 34px; }
+  .room-toggle { top: 56px; right: 12px; padding: 6px 12px; }
+
+  /* the invitation drops under the top row, where the panel tab is not */
+  .invite {
+    top: auto;
+    bottom: 226px;
+    max-width: calc(100% - 24px);
+    padding: 9px 10px 9px 14px;
+  }
+  .invite-copy strong { font-size: 13.5px; }
+
+  /* closed, its tab sits just above the thumb-stick; open, it takes the bottom */
+  .casefile {
+    top: auto;
+    bottom: 176px;
+    left: 12px;
+    right: 12px;
+    width: auto;
+  }
+  .casefile--open {
+    bottom: 12px;
+    width: auto;
+    max-height: min(58vh, calc(100vh - 140px));
+    padding: 16px;
+  }
+
+  .fieldlog {
+    left: 12px;
+    right: 12px;
+    width: auto;
+    bottom: auto;
+    top: 100px;
+  }
+
+  .room { top: 100px; left: 12px; right: 12px; width: auto; max-height: calc(100vh - 120px); }
+
+  .chat-shell, .memory-shell, .memory-read {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    width: auto;
+    transform: none;
+    max-height: calc(100vh - 24px);
+    overflow-y: auto;
+  }
+
+  .beat { bottom: 226px; width: calc(100% - 24px); }
+  .talk-prompt { bottom: 226px; }
+  .you-are-here { max-width: min(220px, 55vw); }
+
+  .boot-inner { padding: 20px 16px; }
+  .boot-title { font-size: clamp(38px, 11vw, 64px); }
+  .looks { gap: 8px; }
+  .look { width: 52px; height: 66px; }
+  .jurisdiction { flex-wrap: wrap; }
+  .jurisdiction .hud-button { width: 100%; }
+}
+
+/* ---- the panel tab, when the panel is open ------------------------------- */
+/* An open panel scrolls, and a scrolling box clips anything hung above it, so
+   the tab moves inside where it can actually be pressed. */
+.casefile--open .casefile-tab {
+  position: relative;
+  top: auto;
+  left: auto;
+  margin: -4px 0 14px;
+}
+
+/* ---- panels: the body scrolls, the buttons stay put ----------------------- */
+
+.casefile--open {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
+.casefile--open .casefile-tab { flex: none; }
+
+.casefile-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0 -20px;
+  padding: 0 20px 16px;
+  -webkit-mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - 22px), transparent 100%);
+  mask-image: linear-gradient(180deg, #000 0, #000 calc(100% - 22px), transparent 100%);
+}
+
+.casefile--open > .action-panel {
+  flex: none;
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+@media (max-width: 720px) {
+  .casefile-body { margin: 0 -16px; padding: 0 16px 14px; }
+}
+
+/* ---- the clock, held ------------------------------------------------------ */
+
+.clock--held { color: var(--muted); opacity: 0.7; }
+
+/* ---- nudges and notes ----------------------------------------------------- */
+
+.nudge--soft { opacity: 0.8; }
+
+.fieldlog-sofar {
+  margin: 0;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(212, 112, 143, 0.07);
+  color: var(--ink);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.fieldlog-sofar b { color: var(--accent); font-weight: 600; }
+
+/* ---- asking again --------------------------------------------------------- */
+
+.chat-retry {
+  margin-left: 10px;
+  padding: 4px 10px;
+  border: 1px solid var(--danger);
+  border-radius: 999px;
+  background: none;
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chat-retry:hover { background: var(--danger); color: #fff; }
+
+/* ---- the closing line ----------------------------------------------------- */
+
+.score-verdict {
+  margin: -6px 0 18px;
+  color: var(--muted);
+  font-family: var(--display);
+  font-size: 17px;
+  line-height: 1.5;
+  font-variation-settings: "SOFT" 60, "WONK" 1;
+}
+
+/* ---- one bar across the top --------------------------------------------- */
+
+.topbar {
+  position: absolute;
+  z-index: 7;
+  top: 12px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  pointer-events: none;
+}
+
+.topbar-group {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 14px;
+  border-radius: 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  box-shadow: 0 8px 22px rgba(90, 62, 44, 0.14);
+}
+
+.topbar-left { display: block; padding: 8px 14px 8px; min-width: 0; }
+.topbar-left .hud-who { font-size: 18px; }
+.topbar-left .hud-leave { margin-top: 2px; }
+
+.topbar-stats { gap: 18px; }
+.topbar-right .hud-stat { padding-right: 4px; }
+
+/* the same buttons, no longer floating on their own */
+.topbar .invite,
+.topbar .room-toggle,
+.topbar .sound-toggle {
+  position: static;
+  transform: none;
+  animation: none;
+  box-shadow: none;
+  max-width: none;
+}
+
+.topbar .invite {
+  gap: 10px;
+  padding: 6px 14px 6px 10px;
+  border-color: rgba(201, 138, 60, 0.45);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.topbar .invite:hover { border-color: var(--gold); background: rgba(201, 138, 60, 0.08); }
+.topbar .invite-mark { width: 26px; height: 26px; font-size: 12px; }
+.topbar .invite-copy strong { font-size: 14px; }
+.topbar .invite-copy em { font-size: 11px; }
+
+.topbar .room-toggle { padding: 6px 10px; border: 0; background: none; }
+.topbar .sound-toggle { width: 32px; height: 32px; border: 0; background: none; }
+
+@media (max-width: 720px) {
+  .topbar { left: 8px; right: 8px; top: 8px; gap: 6px; }
+  .topbar-group { padding: 6px 10px; gap: 8px; }
+  .topbar .invite-copy em { display: none; }
+  .topbar-left .hud-who { font-size: 15px; }
+}
+
+/* the key legend, once it has taught you the keys */
+.hud-keys { transition: opacity 0.6s; }
+.hud-keys--faded { opacity: 0.35; }
+.hud-keys--faded:hover { opacity: 1; }
+
+/* ---- the first memory --------------------------------------------------- */
+
+.first-memory {
+  width: min(520px, calc(100% - 60px));
+  padding: 18px 22px 16px;
+  border-radius: 14px;
+}
+
+.first-memory .beat-text { font-size: 16px; }
+.first-memory .memory-actions { margin-top: 14px; }
+
+.link-button {
+  margin-left: 10px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.boot-lede--arrival strong { color: var(--accent); font-weight: 600; }
+
+/* ---- memories by year --------------------------------------------------- */
+
+.years {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 14px 0 0;
+}
+
+.year {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: none;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+
+.year:hover { border-color: var(--accent); color: var(--ink); }
+.year--on { border-color: var(--accent); background: rgba(212, 112, 143, 0.12); color: var(--accent); }
+
+/* ---- the place you just walked up to ----------------------------------- */
+
+.place-chip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px 8px 14px;
+  border-color: var(--line);
+  color: var(--ink);
+  animation: beat-in 0.3s ease;
+}
+
+.place-chip-name { font-weight: 600; }
+.place-chip-ask { color: var(--accent); font-size: 12px; }
+button.place-chip:hover .place-chip-ask { color: #fff; }
+
+/* ---- the real street, beside the words ---------------------------------- */
+
+.memory-read .streetphoto,
+.memory-shell .streetphoto {
+  margin: 0 0 12px;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.memory-shell .streetphoto img { max-height: 170px; }

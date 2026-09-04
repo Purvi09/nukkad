@@ -4,11 +4,11 @@
 // the feature works before anyone has touched a console.
 
 import {
-  addDoc, collection, deleteDoc, doc, getDocs, limit, orderBy, query, serverTimestamp, where,
+  addDoc, collection, deleteDoc, doc, getDoc, getDocs, limit, orderBy, query, serverTimestamp, where,
 } from "firebase/firestore";
 import { getDownloadURL, ref, uploadString } from "firebase/storage";
 import { currentUid, db, firebaseReady, storage } from "./firebase";
-import { toLatLon, type LatLon } from "./geo";
+import { toLatLon, toMetres, type LatLon } from "./geo";
 
 export type Memory = {
   id: string;
@@ -144,6 +144,30 @@ export const listMemories = async (city: string): Promise<Memory[]> => {
     return local.sort((a, b) => b.at - a.at);
   }
 };
+
+/** One memory by id, for a link someone was sent. */
+export const getMemory = async (id: string): Promise<Memory | null> => {
+  if (id.startsWith("local-")) return readLocal().find((m) => m.id === id) ?? null;
+  const store = firebaseReady ? db() : null;
+  if (!store) return null;
+  try {
+    const snap = await getDoc(doc(store, "memories", id));
+    if (!snap.exists()) return null;
+    return { id: snap.id, ...(snap.data() as Omit<Memory, "id">) };
+  } catch {
+    return null;
+  }
+};
+
+/** Memories are stored in metres from the centre they were built against. A
+ *  city built later, or geocoded a little differently, needs them re-projected
+ *  from the latitude and longitude that never change. */
+export const rehome = (list: Memory[], centre: LatLon): Memory[] =>
+  list.map((m) => {
+    if (typeof m.lat !== "number" || typeof m.lon !== "number") return m;
+    const at = toMetres(centre, m.lat, m.lon);
+    return { ...m, x: Math.round(at.x), y: Math.round(at.y) };
+  });
 
 /** Only the person who left it may take it down. */
 export const removeMemory = async (memory: Memory): Promise<boolean> => {

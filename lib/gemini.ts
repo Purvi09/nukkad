@@ -12,6 +12,11 @@ type Ask = {
   timeoutMs?: number;
   /** Cheap, high-volume calls should start on the smaller models. */
   tier?: "best" | "cheap";
+  /**
+   * Total wall-clock across the whole rotation. A player is waiting on the
+   * other end; past this the caller's own fallback is the better answer.
+   */
+  budgetMs?: number;
 };
 
 /** Best first; the lite models are perfectly good for phrasing work. */
@@ -44,23 +49,26 @@ const BUSY_REST_MS = 60 * 1000;         // just overloaded: try again shortly
 export type GeminiResult = { text: string; model: string } | null;
 
 export async function askGemini({
-  prompt, json = true, temperature, timeoutMs = 25_000, tier = "best",
+  prompt, json = true, temperature, timeoutMs = 25_000, tier = "best", budgetMs,
 }: Ask): Promise<GeminiResult> {
   const key = process.env.GEMINI_API_KEY;
   if (!key) return null;
 
   const now = Date.now();
+  const deadline = budgetMs ? now + budgetMs : Infinity;
   const models = (tier === "cheap" ? CHEAP : BEST)
     .filter((m) => (restingUntil.get(m) ?? 0) <= now);
 
   for (const model of models) {
+    const left = deadline - Date.now();
+    if (left < 1500) break;
     try {
       const response = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          signal: AbortSignal.timeout(timeoutMs),
+          signal: AbortSignal.timeout(Math.min(timeoutMs, left)),
           body: JSON.stringify({
             contents: [{ role: "user", parts: [{ text: prompt }] }],
             generationConfig: {
@@ -104,22 +112,25 @@ export async function askGemini({
  * before it is allowed onto the map.
  */
 export async function askGeminiVision<T>({
-  prompt, mime, base64, timeoutMs = 25_000,
-}: { prompt: string; mime: string; base64: string; timeoutMs?: number }): Promise<T | null> {
+  prompt, mime, base64, timeoutMs = 25_000, budgetMs,
+}: { prompt: string; mime: string; base64: string; timeoutMs?: number; budgetMs?: number }): Promise<T | null> {
   const key = process.env.GEMINI_API_KEY;
   if (!key) return null;
 
   const now = Date.now();
+  const deadline = budgetMs ? now + budgetMs : Infinity;
   const models = CHEAP.filter((m) => (restingUntil.get(m) ?? 0) <= now);
 
   for (const model of models) {
+    const left = deadline - Date.now();
+    if (left < 1500) break;
     try {
       const response = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          signal: AbortSignal.timeout(timeoutMs),
+          signal: AbortSignal.timeout(Math.min(timeoutMs, left)),
           body: JSON.stringify({
             contents: [{
               role: "user",
